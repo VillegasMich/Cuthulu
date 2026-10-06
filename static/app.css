@@ -201,6 +201,9 @@ main { flex: 1; min-height: 0; padding: 12px 16px; }
   text-transform: lowercase;
   padding: 4px 8px;
   border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .services td {
@@ -225,6 +228,17 @@ main { flex: 1; min-height: 0; padding: 12px 16px; }
 .c-up { width: 12ch; }
 .c-act { width: 24ch; text-align: right; }
 .num { text-align: right; }
+
+/* column widths set with the header splitters (--col-*, % of the table);
+   a fixed layout makes them exact, and name takes what is left */
+@media (min-width: 901px) {
+  .services { table-layout: fixed; }
+  .c-state { width: var(--col-state, 15ch); }
+  .c-group { width: var(--col-group, 14%); }
+  .c-image { width: var(--col-image, 26%); }
+  .c-ports { width: var(--col-ports, 16%); }
+  .c-up { width: var(--col-up, 12ch); }
+}
 
 .c-act .btn { padding: 0 6px; margin-left: 4px; visibility: hidden; }
 .services tr:hover .c-act .btn,
@@ -254,8 +268,9 @@ main { flex: 1; min-height: 0; padding: 12px 16px; }
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(280px, 360px) 1fr;
-  gap: 16px;
+  /* the 16px middle track is the splitter (#split-meta) */
+  grid-template-columns: clamp(220px, var(--split-meta, 360px), 70%) 16px minmax(0, 1fr);
+  gap: 16px 0;
 }
 
 .meta { overflow: auto; padding-right: 4px; }
@@ -306,9 +321,34 @@ ul.plain { margin: 4px 0 0; padding-left: 2ch; list-style: none; }
 .log.show-ts .ts { display: inline; }
 .log .ln.hide { display: none; }
 
+/* ── splitters ───────────────────────────────────────────── */
+
+/* A drag handle on a pane border: the line is the 1px --border rule
+   (drawn by ::after, or the neighbour's own border underneath it), --accent
+   on hover / drag / focus. See "Splitters" in docs/DESIGN.md. */
+.split { position: relative; z-index: 1; touch-action: none; cursor: col-resize; }
+.split:focus-visible { outline: none; }
+.split::after { content: ""; position: absolute; top: 0; bottom: 0; right: 0; width: 1px; }
+.split:hover::after, .split.drag::after, .split:focus-visible::after { background: var(--accent); }
+
+/* detail view: the 16px gap between info and logs, its line on the logs' left border */
+#split-meta { margin-right: -1px; }
+
+/* host panel: a strip over the box's bottom border */
+.split-row { position: absolute; left: -1px; right: -1px; bottom: -4px; height: 7px; cursor: row-resize; }
+.split-row::after { top: 3px; bottom: auto; left: 0; width: auto; height: 1px; }
+
+/* table header: a handle on each column's right edge, line always shown */
+.col-split { position: absolute; top: 0; right: 0; bottom: 0; width: 7px; }
+.col-split::after { background: var(--border); }
+
+body[data-resizing] { user-select: none; }
+body[data-resizing="col"], body[data-resizing="col"] * { cursor: col-resize; }
+body[data-resizing="row"], body[data-resizing="row"] * { cursor: row-resize; }
+
 /* ── host panel ──────────────────────────────────────────── */
 
-.sys { margin-bottom: 12px; border: 1px solid var(--border); background: var(--surface); }
+.sys { position: relative; margin-bottom: 12px; border: 1px solid var(--border); background: var(--surface); }
 
 .sys-head {
   display: flex;
@@ -334,8 +374,16 @@ ul.plain { margin: 4px 0 0; padding-left: 2ch; list-style: none; }
 .sys-head #sys-host { font-weight: 400; }
 .sys-state { font-weight: 400; }
 
-.sys-body { display: flex; flex-wrap: wrap; gap: 6px 24px; padding: 6px 8px; }
+.sys-body {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 24px;
+  max-height: var(--split-sys, none);
+  overflow-y: auto;
+  padding: 6px 8px;
+}
 .sys-body[hidden] { display: none; }
+.sys[data-open="false"] .split { display: none; }
 .sys-meters { flex: none; max-width: 100%; overflow-x: auto; }
 .meters { display: grid; gap: 0 2ch; white-space: pre; }
 .meter .lbl { color: var(--key); }
@@ -444,6 +492,7 @@ button.todo-check:hover:not(:disabled) { color: var(--accent); }
 
 @media (max-width: 900px) {
   .detail { grid-template-columns: 1fr; }
+  #split-meta, .col-split { display: none; }
   .logs { min-height: 70vh; }
   .c-group, .c-ports, .c-image { display: none; }
 }

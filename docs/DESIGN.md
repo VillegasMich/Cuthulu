@@ -116,9 +116,11 @@ stores an explicit choice in `localStorage` and sets `data-theme` on `<html>`.
   rows show); the counts keep the full totals and mark the hidden part. The
   choice is stored in `localStorage` (`cuthulu.index.stopped`).
 - Main: sortable table. Sticky header. Row actions appear on hover/focus
-  (`start` / `stop` / `restart` as small text buttons).
-- Detail view: two panes — metadata on the left (narrow), logs on the right
-  (wide). On small screens they stack.
+  (`start` / `stop` / `restart` as small text buttons). Column widths are
+  adjustable with header splitters (see [Splitters](#splitters)).
+- Detail view: two panes — metadata on the left (narrow, 360px by default),
+  logs on the right (wide), with a splitter between them. On small screens
+  they stack.
   - Metadata is a key/value list: keys in `--key`, values in `--text`, a
     1px `--border` rule under each row (not the last). Project in
     `--project`, image tag in `--tag`; in ports the host address and `/proto`
@@ -140,6 +142,40 @@ stores an explicit choice in `localStorage` and sets `data-theme` on `<html>`.
   button that appears on hover/focus like row actions. Done items are
   `--muted` and struck through. An input + `add` button below; Enter adds.
   The list scrolls past 40vh. No new color tokens.
+
+## Splitters
+
+Pane borders that can be dragged, so clipped text and boxes can be given more
+room. One component (`.split`, `splitter()` in `app.js`), used in three places:
+
+| Where | Moves | Bounds | Stored as |
+|-------|-------|--------|-----------|
+| Detail view, between info and logs | info column width | 220px … 70% | `cuthulu.split.meta` (px) |
+| Dashboard table, right edge of `state` … `ports` headers | the border between two columns | 56px per column, 120px for `name` | `cuthulu.split.cols` (% of the table, per column) |
+| Host panel, bottom border | panel body height (a max-height; it scrolls) | 2 text lines … full height | `cuthulu.split.sys` (px) |
+
+- **Look:** no new chrome. The line is the existing 1px `--border` rule —
+  the logs box's left border, the host panel's bottom border, or a 1px
+  `--border` line at each resizable header's right edge — and turns
+  `--accent` on hover, while dragging, and on keyboard focus. The hit area is
+  wider than the line (the 16px gap on the detail view, 7px elsewhere);
+  the cursor is `col-resize` / `row-resize`.
+- **Columns** trade width with their neighbour only: dragging a border
+  moves just that border. `name` has no width of its own and takes what is
+  left. Widths are a fixed table layout above 900px.
+- **Host panel** heights snap to whole text lines, so no row is cut in half.
+  Dragging back to full height forgets the limit.
+- **Keyboard:** each splitter is focusable (`role="separator"`,
+  `aria-orientation`, `aria-valuenow/min/max` in px). Arrow keys along its
+  axis step 16px (one line for the host panel), 4× with shift; `Home` /
+  `End` or a double-click restore the default.
+- **Persistence:** per browser in `localStorage`; `theme.js` applies stored
+  sizes as CSS custom properties (`--split-meta`, `--split-sys`, `--col-*`)
+  before first paint, so nothing jumps on load. Without storage, sizes last
+  for the page.
+- **Narrow screens** (≤ 900px), where the detail panes stack and the table
+  drops columns, hide the detail and column splitters and ignore stored
+  column widths.
 
 ## Icons
 
@@ -210,6 +246,7 @@ in `localStorage` (`cuthulu.sys.open`), as is the process sort
 | `t`        | toggle theme |
 | `Esc`      | back (same as the back arrow) / close / clear filter / clear selection |
 | `?`        | show shortcuts |
+| `←` `→` / `↑` `↓` | resize, when a splitter has focus (`Home` / `End`: reset) |
 
 ## The eye
 

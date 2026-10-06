@@ -42,6 +42,13 @@ itself (per-service TODOs) lives in one JSON file in `CUTHULU_DATA_DIR`.
 All frontend assets (JS, CSS, the JetBrains Mono font) live under `static/`
 and are embedded in the binary. Nothing is loaded from a CDN.
 
+UI preferences (theme, toggles, pane sizes from the splitters) are kept per
+browser in `localStorage` under `cuthulu.*` keys — never on the server. Every
+access is wrapped in `try`/`catch`, so the UI works with storage blocked.
+`static/theme.js` runs in `<head>`, before first paint, and applies the
+stored theme and pane sizes (as CSS custom properties on `<html>`), so pages
+do not flash or jump on load.
+
 ## Source layout
 
 ```
