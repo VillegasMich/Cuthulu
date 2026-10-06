@@ -11,6 +11,11 @@
 </head>
 <body data-page="{% block page %}{% endblock %}" data-read-only="{{ read_only }}">
   <header class="topbar">
+    <button id="back" class="btn icon" type="button" title="back" aria-label="back">
+      <svg class="ico" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+        <path d="M20 12H4.5M11 5l-7 7 7 7"/>
+      </svg>
+    </button>
     <a class="brand" href="/" title="all services">
       <svg class="eye" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
         <path d="M1.5 12C4.6 6.6 8 4.5 12 4.5s7.4 2.1 10.5 7.5c-3.1 5.4-6.5 7.5-10.5 7.5S4.6 17.4 1.5 12Z"/>
@@ -22,7 +27,15 @@
     <span class="spacer"></span>
     {% if read_only %}<span class="tag" title="CUTHULU_READ_ONLY is set">read-only</span>{% endif %}
     <span id="conn" class="conn" data-state="pending">docker: connecting</span>
-    <button id="theme" class="btn" type="button" title="toggle theme (t)">theme</button>
+    <button id="theme" class="btn icon" type="button" title="toggle theme (t)" aria-label="toggle theme (t)">
+      <svg class="ico sun" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+        <circle cx="12" cy="12" r="4"/>
+        <path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M4.9 19.1l1.8-1.8M17.3 6.7l1.8-1.8"/>
+      </svg>
+      <svg class="ico moon" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+        <path d="M20.5 14.5A8.5 8.5 0 1 1 9.5 3.5a7 7 0 0 0 11 11Z"/>
+      </svg>
+    </button>
   </header>
 
   <main>{% block main %}{% endblock %}</main>
@@ -43,6 +56,7 @@
       <tr><td><kbd>s</kbd></td><td>start / stop selected</td></tr>
       <tr><td><kbd>r</kbd></td><td>restart selected</td></tr>
       <tr><td><kbd>f</kbd></td><td>toggle log follow</td></tr>
+      <tr><td><kbd>a</kbd></td><td>show / hide stopped</td></tr>
       <tr><td><kbd>t</kbd></td><td>toggle theme</td></tr>
       <tr><td><kbd>esc</kbd></td><td>clear / back</td></tr>
       <tr><td><kbd>?</kbd></td><td>this help</td></tr>

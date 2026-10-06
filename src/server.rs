@@ -218,6 +218,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn topbar_has_icon_controls_and_dashboard_hides_stopped_toggle() {
+        let (app, _) = app_with(vec![web()], false).await;
+        let (_, _, index) = send(&app, get("/")).await;
+        assert!(index.contains(r#"id="back""#) && index.contains(r#"aria-label="back""#));
+        assert!(index.contains(r#"aria-label="toggle theme (t)""#));
+        assert!(index.contains(r#"class="ico sun""#) && index.contains(r#"class="ico moon""#));
+        assert!(index.contains(r#"id="show-stopped""#));
+        assert!(!index.contains("state-filter"));
+
+        // Every page shell gets the back arrow; only the dashboard has the toggle.
+        let (_, _, other) = send(&app, get("/nope")).await;
+        assert!(other.contains(r#"id="back""#));
+        assert!(!other.contains(r#"id="show-stopped""#));
+    }
+
+    #[tokio::test]
     async fn serves_assets_with_etag() {
         let (app, _) = app_with(vec![], false).await;
         let (status, headers, _) = send(&app, get("/static/app.css")).await;

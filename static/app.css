@@ -125,6 +125,31 @@ body.alert .eye .pupil { fill: var(--err); }
 
 .tag { padding: 0 6px; border: 1px solid var(--warn); color: var(--warn); border-radius: 2px; }
 
+/* icon buttons (back, theme): same box as a text .btn, hand-drawn stroke icons */
+.btn.icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: calc(1.45em + 6px);
+  min-width: calc(1.45em + 6px);
+  padding: 0 5px;
+  color: var(--muted);
+}
+.btn.icon:hover:not(:disabled) { color: var(--text); }
+.ico { display: block; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
+/* back: invisible (but keeps its slot) on the dashboard unless there is history */
+body[data-page="index"]:not(.can-back) #back { visibility: hidden; }
+
+/* theme: sun in light, moon in dark; mirrors the token rules above */
+#theme .moon { display: none; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) #theme .sun { display: none; }
+  :root:not([data-theme="light"]) #theme .moon { display: block; }
+}
+:root[data-theme="dark"] #theme .sun { display: none; }
+:root[data-theme="dark"] #theme .moon { display: block; }
+
 /* ── controls ────────────────────────────────────────────── */
 
 .btn, .input {

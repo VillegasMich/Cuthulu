@@ -35,6 +35,8 @@ Each phase should end in something runnable. Tick items as they land.
 ## Phase 5 — Polish
 - [x] Keyboard shortcuts
 - [x] Search / state filter
+- [x] Hide stopped services by default (`show stopped` toggle, `a`)
+- [x] Topbar back arrow and sun/moon theme icon
 - [ ] Sortable columns
 - [ ] Group by compose project (collapsible sections)
 - [ ] Optional `CUTHULU_AUTH_TOKEN`
