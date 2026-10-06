@@ -49,7 +49,7 @@
   <main>{% block main %}{% endblock %}</main>
 
   <footer class="foot">
-    <span>cuthulu v{{ version }}</span>
+    <span>cuthulu <a href="{{ crate::build_info::RELEASE_URL }}" title="release notes">v{{ version }}</a>{% if let Some(sha) = crate::build_info::short_sha() %} <span title="git commit">{{ sha }}</span>{% endif %}</span>
     <span><kbd>?</kbd> shortcuts</span>
   </footer>
 

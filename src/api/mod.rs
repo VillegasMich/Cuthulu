@@ -8,6 +8,7 @@ mod services;
 mod system;
 mod tailscale;
 mod todos;
+mod version;
 
 use axum::Router;
 use axum::routing::{get, post};
@@ -31,6 +32,7 @@ pub fn router() -> Router<AppState> {
         .route("/system", get(system::snapshot))
         .route("/system/stream", get(system::stream))
         .route("/tailscale", get(tailscale::link))
+        .route("/version", get(version::get))
 }
 
 fn parse_id(raw: &str) -> Result<ServiceId, ApiError> {

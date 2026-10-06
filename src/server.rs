@@ -142,6 +142,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn version_endpoint_and_footer_show_the_build() {
+        let (app, _) = app_with(vec![], false).await;
+        let (status, _, body) = send(&app, get("/api/version")).await;
+        assert_eq!(status, StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            json["git_sha"].as_str(),
+            crate::build_info::git_sha(),
+            "null unless CUTHULU_BUILD_SHA was set at build time"
+        );
+
+        // Every page footer links the version to its release tag.
+        let (_, _, page) = send(&app, get("/nope")).await;
+        let link = format!(
+            r#"<a href="https://github.com/VillegasMich/cuthulu/releases/tag/v{0}" title="release notes">v{0}</a>"#,
+            env!("CARGO_PKG_VERSION")
+        );
+        assert!(page.contains(&link), "{page}");
+    }
+
+    #[tokio::test]
     async fn lists_and_filters_services() {
         let (app, _) = app_with(vec![web(), service("db", ServiceState::Stopped)], false).await;
 

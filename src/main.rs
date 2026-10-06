@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
+use cuthulu::build_info;
 use cuthulu::config::Config;
 use cuthulu::providers::docker::DockerProvider;
 use cuthulu::registry::Registry;
@@ -31,7 +32,10 @@ fn main() -> anyhow::Result<ExitCode> {
         None => {}
         Some("healthcheck") => return Ok(healthcheck()),
         Some("-V" | "--version") => {
-            println!("cuthulu {}", env!("CARGO_PKG_VERSION"));
+            match build_info::short_sha() {
+                Some(sha) => println!("cuthulu {} ({sha})", build_info::VERSION),
+                None => println!("cuthulu {}", build_info::VERSION),
+            }
             return Ok(ExitCode::SUCCESS);
         }
         Some("-h" | "--help") => {
@@ -72,7 +76,8 @@ async fn run() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("cannot listen on {}", config.bind))?;
     info!(
-        version = env!("CARGO_PKG_VERSION"),
+        version = build_info::VERSION,
+        git_sha = build_info::git_sha().unwrap_or("unknown"),
         read_only = config.read_only,
         "listening on http://{}",
         listener.local_addr()?

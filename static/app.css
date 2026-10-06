@@ -467,6 +467,7 @@ button.todo-check:hover:not(:disabled) { color: var(--accent); }
   border-top: 1px solid var(--border);
   font-size: 11px;
 }
+.foot a { color: inherit; }
 
 .flash {
   position: fixed;

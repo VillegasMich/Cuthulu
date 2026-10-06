@@ -57,6 +57,7 @@ src/
   main.rs              CLI (run | healthcheck | --version), tracing, graceful shutdown
   lib.rs
   config.rs            CUTHULU_* env parsing (pure, unit-tested via a lookup fn)
+  build_info.rs        version (Cargo.toml) + git commit injected at build time
   model.rs             Service, ServiceId, ServiceState, Action, LogLine, …
   registry.rs          in-memory state, watch loop per provider, broadcast; MockProvider for tests
   server.rs            AppState, router, security headers; HTTP-level tests
@@ -72,6 +73,7 @@ src/
     guard.rs           CSRF / same-origin check for POSTs
     todos.rs           per-service TODO list / create / toggle / delete
     tailscale.rs       link to this machine in the Tailscale admin console
+    version.rs         running build (version, commit)
     error.rs           ApiError → JSON { error, code }
   providers/
     mod.rs             Provider trait, ProviderError, ProviderEvent
@@ -178,6 +180,7 @@ services.
 | POST   | `/api/services/{id}/todos/{todo_id}/toggle` | Flip done; returns the list |
 | POST   | `/api/services/{id}/todos/{todo_id}/delete` | Remove; returns the list |
 | GET    | `/api/tailscale`                   | `{available, url, tailnet, host, ip}` for the topbar's Tailscale admin link; always 200 |
+| GET    | `/api/version`                     | `{"version": "0.1.0", "git_sha": "<full sha>" \| null}` |
 
 Errors: JSON `{ "error": "...", "code": "bad_request|forbidden|not_found|unavailable|internal" }`.
 
@@ -376,6 +379,12 @@ allowed after a confirmation.
 | `RUST_LOG`               | `info`                         | Tracing filter |
 
 Planned: `CUTHULU_AUTH_TOKEN` (phase 5).
+
+Build time, not runtime: `CUTHULU_BUILD_SHA` (set from the image's `GIT_SHA`
+build arg) is compiled in as the commit shown in the footer and
+`/api/version`; without it only the version is shown. The version is
+`Cargo.toml`'s, bumped by the release workflow
+([DEPLOYMENT.md](DEPLOYMENT.md#releasing)).
 
 ## Security
 

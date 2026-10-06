@@ -9,8 +9,8 @@ The repository's [`compose.yaml`](../compose.yaml):
 ```yaml
 services:
   cuthulu:
+    image: ${IMAGE:-villegasmich/cuthulu:latest}
     build: .
-    image: villegasmich/cuthulu:latest
     container_name: cuthulu
     restart: unless-stopped
     ports:
@@ -39,11 +39,25 @@ volumes:
   cuthulu-data:
 ```
 
+Run the [published image](#published-images) (Compose pulls it; before the
+first release, or offline, it falls back to building the checkout):
+
+```sh
+DOCKER_GID=$(stat -c %g /var/run/docker.sock) docker compose up -d
+# pin a release instead of latest:
+IMAGE=villegasmich/cuthulu:1.2.3 DOCKER_GID=$(stat -c %g /var/run/docker.sock) docker compose up -d
+# update: docker compose pull && docker compose up -d
+```
+
+Or build this checkout (the result is tagged with the `image:` name):
+
 ```sh
 DOCKER_GID=$(stat -c %g /var/run/docker.sock) docker compose up -d --build
 ```
 
-Then open <http://localhost:8686>.
+Then open <http://localhost:8686>. The footer shows the running version
+(linked to its GitHub release) and, for CI-built images, the short commit;
+`GET /api/version` returns the same as JSON.
 
 `DOCKER_GID` is needed because the image runs as an unprivileged user (uid
 65532); adding it to the socket's group is what lets it talk to Docker.
@@ -51,7 +65,6 @@ Then open <http://localhost:8686>.
 ## Plain docker run
 
 ```sh
-docker build -t cuthulu .
 docker run -d --name cuthulu --restart unless-stopped \
   -p 127.0.0.1:8686:8686 \
   -v /var/run/docker.sock:/var/run/docker.sock \
@@ -59,7 +72,7 @@ docker run -d --name cuthulu --restart unless-stopped \
   -v /var/run/tailscale:/var/run/tailscale:ro \
   -v cuthulu-data:/data \
   --group-add "$(stat -c %g /var/run/docker.sock)" \
-  cuthulu
+  villegasmich/cuthulu:1.2.3   # or `cuthulu` after `docker build -t cuthulu .`
 ```
 
 ## Host panel
@@ -132,6 +145,126 @@ Back it up by copying the file; it is written atomically (temp file + rename).
   refuses to stop itself.
 - `HEALTHCHECK` runs `/cuthulu healthcheck`, which requests `/healthz` over
   plain TCP (there is no `curl` in `scratch`).
+- Multi-arch without emulation: the build stage runs on the build machine's
+  platform (`--platform=$BUILDPLATFORM`) and cross-compiles for the target
+  (`x86_64-` / `aarch64-unknown-linux-musl`, arm64 linked with the
+  toolchain's `rust-lld`); the runtime stage only copies files. A cold arm64
+  build takes about as long as an amd64 one, where QEMU would make it many
+  times slower. The trade-off: this works because every dependency is pure
+  Rust. A crate that compiles C code would need a cross C toolchain (e.g.
+  `cargo-zigbuild`), or a switch back to QEMU (drop `--platform=$BUILDPLATFORM`
+  and add `docker/setup-qemu-action` in CI).
+
+  ```sh
+  docker buildx build --platform linux/amd64,linux/arm64 -t <you>/cuthulu --push .
+  ```
+- Build args: `GIT_SHA` (full commit, compiled in and shown in the footer and
+  `/api/version`; also the `org.opencontainers.image.revision` label) and
+  `VERSION` (the `org.opencontainers.image.version` label). Both are optional;
+  CI sets them, for a local build:
+
+  ```sh
+  docker build --build-arg GIT_SHA=$(git rev-parse HEAD) \
+    --build-arg VERSION=$(scripts/bump-version.sh) -t cuthulu .
+  ```
+
+## Published images
+
+CI (`docker` job in [`ci.yml`](../.github/workflows/ci.yml)) pushes the image
+to Docker Hub when a GitHub release is **published**, or when run manually on
+a release tag with *publish* (what the [Release workflow](#releasing) does).
+The tag must be `v<version>` with the version in `Cargo.toml` (the job checks);
+`v1.2.3` becomes the image tags `1.2.3`, `1.2` and `latest` (no `latest` for
+pre-releases like `v1.3.0-rc.1`), for `linux/amd64` and `linux/arm64`. Every
+other run (PRs, pushes to `main`) builds the amd64 image, smoke-tests it
+(including `/api/version` against `Cargo.toml` and the commit) and only does a
+dry-run push: the tags it would get are in the job summary.
+
+One-time setup:
+
+1. Docker Hub → *Account settings* → *Personal access tokens* → *Generate new
+   token*, access **Read & Write**. Copy it (it's shown once).
+2. GitHub repo → *Settings* → *Secrets and variables* → *Actions*:
+   - *Secrets* tab → `DOCKERHUB_TOKEN` = the token.
+   - *Variables* tab → `DOCKERHUB_USERNAME` = your Docker Hub username.
+   - Optional variable `DOCKERHUB_IMAGE` (e.g. `myorg/cuthulu`); defaults to
+     `<DOCKERHUB_USERNAME>/cuthulu`. Use lowercase. The Docker Hub repository
+     is created on first push (public on free plans) if it doesn't exist.
+
+Or with `gh`:
+
+```sh
+gh secret set DOCKERHUB_TOKEN          # paste the token when prompted
+gh variable set DOCKERHUB_USERNAME --body <you>
+```
+
+The job fails with an error if the secret or variable is missing. Secrets are
+not exposed to pull requests from forks, and only the publish path logs in.
+
+## Releasing
+
+### From GitHub Actions (recommended)
+
+*Actions* → **Release** → *Run workflow* on `main`
+([`release.yml`](../.github/workflows/release.yml)), or:
+
+```sh
+gh workflow run release.yml                       # automatic bump if needed (below)
+gh workflow run release.yml -f bump=minor         # force patch, minor or major
+gh workflow run release.yml -f version=1.3.0-rc.1 # exact version
+gh workflow run release.yml -f dry_run=true       # show the version and diff only
+```
+
+The job:
+
+1. Refuses to run on anything but `main`, or if CI hasn't passed on the commit.
+2. If `v<version>` from `Cargo.toml` is already tagged, bumps it with
+   [`scripts/bump-version.sh`](../scripts/bump-version.sh), which also updates
+   `Cargo.lock`, and pushes `chore(release): bump version to X.Y.Z` to `main`
+   as `github-actions[bot]`. A version that isn't released yet is released as
+   is (so the first run releases `0.1.0`). With `bump=auto` (default) the bump
+   comes from the [Conventional Commits](https://www.conventionalcommits.org/)
+   since that tag (merge commits ignored); the biggest one wins, and the job
+   log lists each commit's:
+
+   | Commits                                                   | `1.x.y` and up | `0.x.y` |
+   | --------------------------------------------------------- | -------------- | ------- |
+   | breaking: `type!:` or a `BREAKING CHANGE:` footer         | major          | minor   |
+   | `feat`                                                    | minor          | minor   |
+   | anything else (`fix`, `chore`, `docs`, `ci`, ..., non-conventional) | patch | patch |
+
+   With no commits since the tag the job fails (nothing to release).
+   `bump=patch|minor|major` forces a bump, `version` sets an exact one.
+3. Runs `scripts/release.sh --yes` (below): tag + GitHub release with
+   generated notes.
+4. Runs CI on the new tag with `publish=true` and waits for it, so the job
+   only goes green once the image is on Docker Hub. (A release created with
+   the workflow's `GITHUB_TOKEN` doesn't trigger CI's `release` event; a
+   manual run does.)
+
+It uses the built-in `GITHUB_TOKEN` (no extra secret), so it needs the Docker
+Hub settings above, and `main` must accept pushes from GitHub Actions: with
+branch protection or rulesets on `main`, allow the GitHub Actions app to
+bypass them. The bump commit itself doesn't trigger a push CI run (also a
+`GITHUB_TOKEN` effect); the run on the tag tests it. If the job fails after
+pushing the bump, run CI on `main` (*Actions* → *CI* → *Run workflow*), then
+rerun **Release**: the bumped version isn't released yet, so it's released as
+is.
+
+To republish an existing release's image: *Actions* → *CI* → *Run workflow*,
+pick the tag, tick *publish*.
+
+### Locally
+
+From an up-to-date, clean `main` with
+[`scripts/release.sh`](../scripts/release.sh) (`--dry-run` to only check, `-y`
+to skip the prompt). It tags the current commit as `v<version>` from
+`Cargo.toml` and runs `gh release create --generate-notes` (versions like
+`1.3.0-rc.1` become pre-releases), and CI publishes the image on the
+`release` event. It refuses a version that was already released, or a
+`Cargo.lock` that doesn't match: run `scripts/bump-version.sh auto` (or
+`patch`, `minor`, `major`, an exact version), commit both files, push, then
+rerun.
 
 ## Running without Docker (development)
 
