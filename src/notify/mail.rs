@@ -108,12 +108,30 @@ fn subject(host: &str, what: &str) -> String {
 pub fn alert_message(host: &str, alert: &Alert, now: &str, cooldown: Duration) -> Message {
     let name = &alert.name;
     let (what, mut body) = match alert.kind {
+        AlertKind::Down if alert.by_operator => (
+            format!("{name} stopped from cuthulu ({})", alert.detail),
+            format!(
+                "Service {name} on {host} was stopped from the cuthulu dashboard: {detail}.\n\n\
+                 Noticed at: {now}\n",
+                detail = alert.detail
+            ),
+        ),
         AlertKind::Down => (
             format!("{name} is down ({})", alert.detail),
             format!(
                 "Service {name} on {host} is down: {detail}.\n\n\
                  Noticed at: {now}\n",
                 detail = alert.detail
+            ),
+        ),
+        AlertKind::Restarted => (
+            format!("{name} crashed and was restarted ({})", alert.detail),
+            format!(
+                "Service {name} on {host} crashed ({detail}) and was running again \
+                 {down} later, started by a restart policy or a systemd unit.\n\n\
+                 Back at:    {now}\n",
+                detail = alert.detail,
+                down = format_duration(alert.down_for.unwrap_or_default()),
             ),
         ),
         AlertKind::Up => (
@@ -127,6 +145,13 @@ pub fn alert_message(host: &str, alert: &Alert, now: &str, cooldown: Duration) -
             ),
         ),
     };
+    if alert.started_elsewhere {
+        body.push_str(
+            "\nIt was stopped from cuthulu but started again by something else: a systemd \
+             unit (Restart=), a restart policy or a person. To keep it stopped, stop it there, \
+             e.g. `systemctl stop <unit>`.\n",
+        );
+    }
     if alert.flaps > 0 {
         let _ = writeln!(
             body,
@@ -134,11 +159,20 @@ pub fn alert_message(host: &str, alert: &Alert, now: &str, cooldown: Duration) -
             times(alert.flaps)
         );
     }
-    if alert.kind == AlertKind::Down {
+    if alert.kind == AlertKind::Down && alert.by_operator {
+        body.push_str("\nYou get one email when it is back up.\n");
+    } else if alert.kind == AlertKind::Down {
         let _ = write!(
             body,
             "\nYou get one email when it is back up. Further outages of {name} within {} \
              of this email are summed up in a later one.\n",
+            format_duration(cooldown)
+        );
+    } else if alert.kind == AlertKind::Restarted {
+        let _ = write!(
+            body,
+            "\nFurther crashes of {name} within {} of this email are summed up in a later \
+             one. Check its logs in the dashboard.\n",
             format_duration(cooldown)
         );
     }
@@ -230,7 +264,9 @@ mod tests {
             name: "web".into(),
             detail: detail.into(),
             flaps,
-            down_for: (kind == AlertKind::Up).then_some(Duration::from_secs(3720)),
+            down_for: (kind != AlertKind::Down).then_some(Duration::from_secs(3720)),
+            by_operator: false,
+            started_elsewhere: false,
         }
     }
 
@@ -256,6 +292,38 @@ mod tests {
         assert_eq!(m.subject, "[cuthulu] box: web is back up");
         assert!(m.body.contains("Down for:   1h 2m"));
         assert!(m.body.contains("went down once more"));
+    }
+
+    #[test]
+    fn operator_restart_and_started_elsewhere_texts() {
+        let mut a = alert(AlertKind::Down, "exited 143", 0);
+        a.by_operator = true;
+        let m = alert_message("box", &a, NOW, COOLDOWN);
+        assert_eq!(
+            m.subject,
+            "[cuthulu] box: web stopped from cuthulu (exited 143)"
+        );
+        assert!(m.body.contains("stopped from the cuthulu dashboard"));
+        assert!(!m.body.contains("summed up"), "no cooldown for own stops");
+
+        let mut a = alert(AlertKind::Up, "running", 0);
+        a.started_elsewhere = true;
+        let m = alert_message("box", &a, NOW, COOLDOWN);
+        assert_eq!(m.subject, "[cuthulu] box: web is back up");
+        assert!(m.body.contains("systemctl stop"), "{}", m.body);
+
+        let m = alert_message(
+            "box",
+            &alert(AlertKind::Restarted, "exited 3", 2),
+            NOW,
+            COOLDOWN,
+        );
+        assert_eq!(
+            m.subject,
+            "[cuthulu] box: web crashed and was restarted (exited 3)"
+        );
+        assert!(m.body.contains("running again 1h 2m later"), "{}", m.body);
+        assert!(m.body.contains("went down 2 more times"));
     }
 
     #[test]

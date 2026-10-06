@@ -179,7 +179,7 @@ services.
 | POST   | `/api/services/{id}/todos`         | Add an item, body `{"text": "..."}`; returns the list |
 | POST   | `/api/services/{id}/todos/{todo_id}/toggle` | Flip done; returns the list |
 | POST   | `/api/services/{id}/todos/{todo_id}/delete` | Remove; returns the list |
-| GET    | `/api/notify`                      | `{enabled, watched, email, healthcheck, cooldown_minutes}`; never addresses or URLs |
+| GET    | `/api/notify`                      | `{enabled, watched, email, healthcheck, cooldown_minutes, restarted_elsewhere}`; never addresses or URLs |
 | POST   | `/api/notify`                      | Global alert switch, body `{"enabled": bool}`; returns the state |
 | POST   | `/api/services/{id}/notify`        | Watch / unwatch, body `{"watch": bool}`; returns the state |
 | POST   | `/api/notify/test`                 | Send a test email and one ping now; `{email, healthcheck}` each `{status: sent\|off\|failed, error?}` |
@@ -331,7 +331,7 @@ Three independent parts, all optional:
 
 | Part | When | Channel |
 |------|------|---------|
-| **Service alerts** | a *watched* service goes down, and when it is back | email + browser |
+| **Service alerts** | a *watched* service goes down, crashes and is restarted, and when it is back | email + browser |
 | **Shutdown email** | Cuthulu itself stops cleanly (SIGTERM / SIGINT) | email |
 | **Heartbeat** | every `CUTHULU_HEALTHCHECK_INTERVAL_MINUTES` | GET `CUTHULU_HEALTHCHECK_URL` (e.g. healthchecks.io) |
 
@@ -363,9 +363,24 @@ a `CUTHULU_` prefix, same TLS rules, same heartbeat semantics).
     it is still down when the cooldown ends — one more that says how often it
     went down in between. Short outages during the cooldown that recover are
     not mailed.
-  - *Operator actions are not outages:* a stop/restart requested through
-    Cuthulu silences the down flip within the next 60 s (the operator is
-    looking at the dashboard). `docker stop` from a terminal is alerted.
+  - *Crashed and restarted:* a non-clean exit (any code but 0, 130, 137,
+    143), `dead` or `restarting`, followed by running again *before* the
+    settle ends — a restart policy or a systemd `Restart=` hiding the crash —
+    sends one email right away ("crashed and was restarted"), under the same
+    cooldown. The exit code is read before a `--rm` container disappears.
+  - *Operator actions are labelled:* a down flip within 60 s of a
+    stop/restart requested through Cuthulu is mailed as "stopped from
+    cuthulu" and is exempt from the cooldown (deliberate, rare, and a
+    repeated test should not go silent). A quick restart stays silent as
+    usual.
+  - *Started by something else:* a service stopped through Cuthulu that is
+    running again within 15 min without a start from Cuthulu was brought
+    back by something Cuthulu does not control — typically a systemd unit
+    running `docker run --rm` with `Restart=always`, where stopping the
+    container cannot keep it down. The "back up" email says so and suggests
+    stopping the unit; `GET /api/notify` lists such services in
+    `restarted_elsewhere` (in memory, cleared when the service goes down
+    again or Cuthulu restarts) and the UI marks them.
   - Outages that began before Cuthulu saw the service, or while it was not
     watched, are not reported.
   - Sending is best effort: a bounded outbox (32), 3 attempts 10 s / 20 s
@@ -376,7 +391,9 @@ a `CUTHULU_` prefix, same TLS rules, same heartbeat semantics).
   most one per service per minute), or an in-page flash when permission is
   not granted. Permission is only requested from a click (the bell, the
   alerts switch, "allow", "send test"). A stop/restart clicked in the same
-  tab is not alerted. The Notification API needs a secure context:
+  tab is alerted with "stopped from the dashboard". Independently of
+  watching, a service stopped from this tab that comes back on its own
+  raises a warning flash. The Notification API needs a secure context:
   `localhost` / `127.0.0.1` (or an SSH tunnel to them) qualify, a plain-HTTP
   LAN address does not — then only the flash is shown.
 - **Shutdown email** after the HTTP server has stopped, within 8 s (fits
@@ -395,8 +412,15 @@ a `CUTHULU_` prefix, same TLS rules, same heartbeat semantics).
   says whether each channel is configured.
 
 > **Decision (2026-10):** stops requested through Cuthulu's own buttons are
-> *suppressed*, not labelled: the email exists to tell an operator who is not
-> looking, and the one who clicked "stop" is.
+> *labelled*, not suppressed (first shipped suppressed; changed after testing
+> showed a silent stop looks like broken notifications, and stops of
+> systemd-managed containers need the "started by something else" follow-up
+> anyway).
+>
+> **Decision (2026-10):** Cuthulu does not stop systemd units. It only talks
+> to Docker; reaching the host's system and user D-Bus from the container
+> would be a separate provider with its own security review. It detects and
+> explains the situation instead.
 
 ## Self-awareness
 

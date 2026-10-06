@@ -141,7 +141,9 @@ What you receive, at most:
 | watched service down for 30 s | `[cuthulu] box: web is down (exited 1)` |
 | …and back up for 30 s | `[cuthulu] box: web is back up` (only after a "down") |
 | crash loop | one "down", then at most one more per `CUTHULU_NOTIFY_COOLDOWN_MINUTES` (15) |
-| stop / restart clicked in Cuthulu | nothing — you did it |
+| crash hidden by an automatic restart (exit code ≠ 0/130/137/143, back within 30 s) | `[cuthulu] box: web crashed and was restarted (exited 1)` |
+| stop clicked in Cuthulu, down for 30 s | `[cuthulu] box: web stopped from cuthulu (exited 143)` — not limited by the cooldown |
+| …and something else starts it again | the "back up" email says so (see below) |
 | Cuthulu stops cleanly | `[cuthulu] box: cuthulu stopped` |
 
 ### Choosing services
@@ -152,6 +154,16 @@ in `notify.json`, so they survive container re-creation. The bell in the top
 bar opens the notifications dialog: the global on/off switch for service
 alerts, which channels are configured, and `send test` (a test email, one
 ping and a desktop notification).
+
+### Containers managed by systemd
+
+Cuthulu only controls Docker. A container started by a systemd unit
+(`ExecStart=docker run --rm …` with `Restart=always`) comes back after you
+stop it in Cuthulu, because the unit starts a new one. Cuthulu notices — the
+row gets a `↻` marker, the service page says "restarts by itself", a warning
+shows in the page, and the "back up" email explains it. To keep such a
+service down, stop the unit: `systemctl stop <unit>` (or
+`systemctl --user stop <unit>`).
 
 ### Desktop notifications
 

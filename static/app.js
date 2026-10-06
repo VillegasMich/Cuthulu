@@ -226,6 +226,8 @@ async function act(s, action) {
 
   store.pending.add(s.id);
   if (action !== "start") notify.acted.set(s.name, Date.now());
+  if (action === "stop") notify.stopped.set(s.name, Date.now());
+  else notify.stopped.delete(s.name);
   changed();
   try {
     const res = await fetch(`/api/services/${encodeURIComponent(s.id)}/${action}`, {
@@ -234,7 +236,10 @@ async function act(s, action) {
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(body.error || res.statusText);
+    const prev = store.services.get(body.id);
     store.services.set(body.id, body);
+    // The SSE upsert for this change will find the store already updated.
+    watchChange(prev, body);
     flash(`${action} ${s.name}: ok`);
   } catch (e) {
     flash(`${action} ${s.name}: ${e.message}`, true);
@@ -305,6 +310,7 @@ function initIndex() {
       el(
         "td",
         { title: s.name },
+        restartsTag(s),
         el("a", { href: svcUrl(s.id), onclick: (e) => e.stopPropagation() }, s.name),
         s.is_self ? el("span", { class: "self" }, "(this)") : null,
       ),
@@ -428,6 +434,7 @@ function initService() {
       el("span", { class: `st ${label.cls}` }, label.text),
       when ? el("span", { class: "muted" }, ` · ${when}`) : null,
       s.is_self ? el("span", { class: "muted" }, " · this is cuthulu") : null,
+      restartsTag(s, true),
     );
     fill($("#actions"), ...actionButtons(s, { all: true }), bell(s, { text: true }));
     for (const t of document.querySelectorAll(".time[data-time]")) {
@@ -931,14 +938,19 @@ if (page === "service") initTodos();
 const ALERT_SETTLE_MS = 10_000;
 // At most one desktop alert per service per minute.
 const ALERT_GAP_MS = 60_000;
-// A stop/restart clicked in this tab is not an outage.
+// A down flip this soon after a stop/restart clicked in this tab is labelled.
 const ACTED_MS = 60_000;
+// A service stopped here that is running again this soon, without a start
+// from here, was started by something else (systemd unit, restart policy).
+const RETURN_MS = 15 * 60_000;
 
 const notify = {
   state: null, // GET /api/notify: {enabled, watched[], email, healthcheck, cooldown_minutes}
   error: "",
   watched: new Set(),
   acted: new Map(), // name -> time of a stop/restart clicked here
+  stopped: new Map(), // name -> time of a stop clicked here (cleared by start/restart)
+  restarts: new Set(), // names started again by something else after a stop here
   timers: new Map(), // name -> pending settle check
   last: new Map(), // name -> time of the last alert
   test: null, // last test report, shown in the dialog
@@ -970,6 +982,7 @@ function setNotifyState(st) {
   notify.state = st;
   notify.error = "";
   notify.watched = new Set(st.watched);
+  for (const name of st.restarted_elsewhere || []) notify.restarts.add(name);
   document.body.classList.toggle("notify-off", !st.enabled);
   drawNotify();
   changed();
@@ -1045,19 +1058,46 @@ function bell(s, { text = false } = {}) {
 
 /** Called for every registry change; schedules a settle check on a down flip. */
 function watchChange(prev, next) {
+  if (next && alertUp(next)) checkReturn(next);
+  // Down again (e.g. stopped with systemctl): the marker no longer applies.
+  if (prev && alertUp(prev) && !(next && alertUp(next))) notify.restarts.delete(prev.name);
   if (!prev || prev.is_self || !alertUp(prev) || (next && alertUp(next))) return;
   const name = prev.name;
   if (!watching(name) || notify.timers.has(name)) return;
-  if (Date.now() - (notify.acted.get(name) || 0) < ACTED_MS) return;
+  const mine = Date.now() - (notify.acted.get(name) || 0) < ACTED_MS;
   notify.timers.set(
     name,
     setTimeout(() => {
       notify.timers.delete(name);
       const now = [...store.services.values()].find((s) => s.name === name);
       if ((now && alertUp(now)) || !watching(name)) return;
-      alertDown(name, now ? stateLabel(now).text : "removed", now?.id);
+      // Gone (e.g. `docker run --rm`): say how it went down.
+      const detail = stateLabel(now || next || { state: "removed" }).text;
+      alertDown(name, mine ? `${detail} · stopped from the dashboard` : detail, now?.id);
     }, ALERT_SETTLE_MS),
   );
+}
+
+/** Warns when a service stopped here runs again without a start from here:
+ * a systemd unit or restart policy brought it back, so stopping the
+ * container cannot keep it down. Applies to every service, watched or not. */
+function checkReturn(s) {
+  const at = notify.stopped.get(s.name);
+  if (at == null) return;
+  notify.stopped.delete(s.name);
+  if (Date.now() - at > RETURN_MS) return;
+  notify.restarts.add(s.name);
+  flash(`${s.name} was started again by something else (a systemd unit or restart policy?) — stop it there to keep it down`, true);
+  changed();
+}
+
+/** Marker for a service that came back on its own after a stop here. */
+function restartsTag(s, long = false) {
+  if (!notify.restarts.has(s.name)) return null;
+  const why = "stopped from cuthulu, then started again by something else (systemd unit, restart policy) — stop it there";
+  return long
+    ? el("span", { class: "warn-text", title: why }, " · restarts by itself")
+    : el("span", { class: "warn-text", title: why, "aria-label": "restarts by itself" }, "↻ ");
 }
 
 /** Shows a desktop notification if allowed; false when it could not. */

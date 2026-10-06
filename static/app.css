@@ -561,6 +561,7 @@ body.notify-off .bell.on { color: var(--muted); }
 .bell-btn { display: inline-flex; align-items: center; gap: 4px; }
 body.notify-off .bell-btn.on { border-color: var(--border); color: var(--muted); }
 .bell-text { align-self: center; }
+.warn-text { color: var(--warn); }
 
 
 .notify-dlg { max-width: min(64ch, calc(100vw - 32px)); }

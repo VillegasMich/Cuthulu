@@ -127,8 +127,13 @@ stores an explicit choice in `localStorage` and sets `data-theme` on `<html>`.
   then `send test` with a per-channel result line (`sent` `--ok`,
   `failed: …` `--err`). Read-only shows the same, without controls.
 - Browser alert: a desktop notification `<name> is down` / `<state> ·
-  cuthulu`; without permission the same text in the error flash. No new
-  color tokens for any of this.
+  cuthulu` (`<state> · stopped from the dashboard` after a stop clicked
+  there); without permission the same text in the error flash.
+- "Restarts by itself": a service stopped from Cuthulu that something else
+  started again gets a `↻` (`--warn`, tooltip explains) before its name in
+  the table, ` · restarts by itself` (`--warn`) on the detail state line,
+  and an error flash suggesting to stop it at its source. No new color
+  tokens for any of this.
 - TODO list (detail view, left pane, below the metadata): heading
   `todo 2/5` (done/total, muted count), one line per item: `[ ]` / `[x]`
   text toggle (`--muted`, `--ok` when done), the text, and a small `del`

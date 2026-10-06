@@ -78,8 +78,9 @@ pub async fn act(
         ));
     }
     if let Some(service) = st.registry.get(&id) {
-        // A stop asked for here is not an outage worth an email.
-        st.notifier.expect(&service.name);
+        // Lets alerts say a stop came from here, and spot a service that
+        // something else (a systemd unit) starts again.
+        st.notifier.expect(&service.name, action == Action::Stop);
     }
     Ok(Json(st.registry.act(&id, action).await?))
 }

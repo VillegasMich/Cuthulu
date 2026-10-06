@@ -23,7 +23,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use self::alerts::{AlertKind, Tracker};
+use self::alerts::Tracker;
 use self::heartbeat::Pinger;
 use self::mail::{Mailer, Message, SmtpMailer};
 pub use self::store::{NotifyStore, Settings, StoreError};
@@ -52,6 +52,9 @@ pub struct NotifyState {
     /// A healthcheck URL is configured.
     pub healthcheck: bool,
     pub cooldown_minutes: u64,
+    /// Running services that were stopped through Cuthulu and then started
+    /// by something else (a systemd unit, a restart policy), sorted.
+    pub restarted_elsewhere: Vec<String>,
 }
 
 /// Outcome of `POST /api/notify/test`, per channel.
@@ -176,8 +179,8 @@ impl Notifier {
 
     /// The operator asked Cuthulu to act on `name`; the down flip that
     /// follows is not an outage.
-    pub fn expect(&self, name: &str) {
-        lock(&self.tracker).expect(name, Instant::now());
+    pub fn expect(&self, name: &str, stop: bool) {
+        lock(&self.tracker).expect(name, stop, Instant::now());
     }
 
     /// Sends a test email and one healthcheck ping, right now.
@@ -229,6 +232,7 @@ impl Notifier {
             email: self.mailer.is_some(),
             healthcheck: self.pinger.is_some(),
             cooldown_minutes: self.cooldown.as_secs() / 60,
+            restarted_elsewhere: lock(&self.tracker).started_elsewhere(),
         }
     }
 
@@ -292,7 +296,7 @@ impl Notifier {
         for alert in alerts {
             info!(
                 service = %alert.name,
-                down = alert.kind == AlertKind::Down,
+                kind = ?alert.kind,
                 detail = %alert.detail,
                 "service alert"
             );
@@ -555,18 +559,19 @@ pub(crate) mod tests {
         );
         wait_for(&emails, 3).await;
 
-        // A stop requested through Cuthulu is not an outage.
-        notifier.expect("web");
+        // A stop requested through Cuthulu is reported as such, even
+        // within the cooldown of the crash above.
+        notifier.expect("web", true);
         let id = set_state("web", ServiceState::Stopped, Some(0));
         tx.send(Ok(ProviderEvent::Changed(id))).unwrap();
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        wait_for(&emails, 4).await;
 
         cancel.cancel();
         for t in tasks {
             t.await.unwrap();
         }
         notifier.stopped().await;
-        wait_for(&emails, 4).await;
+        wait_for(&emails, 5).await;
 
         assert_eq!(
             subjects(&emails),
@@ -574,6 +579,7 @@ pub(crate) mod tests {
                 "[cuthulu] box: web is down (exited 1)",
                 "[cuthulu] box: web is back up",
                 "[cuthulu] box: test notification",
+                "[cuthulu] box: web stopped from cuthulu (exited 0)",
                 "[cuthulu] box: cuthulu stopped",
             ]
         );
@@ -585,9 +591,9 @@ pub(crate) mod tests {
         );
         assert!(emails[0].contains("To: ops@example.com"), "{}", emails[0]);
         assert!(
-            emails[3].contains("Watched services down: web"),
+            emails[4].contains("Watched services down: web"),
             "{}",
-            emails[3]
+            emails[4]
         );
 
         let pings = pings.lock().unwrap();

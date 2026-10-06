@@ -187,6 +187,7 @@ mod tests {
                 "email": false,
                 "healthcheck": false,
                 "cooldown_minutes": 15,
+                "restarted_elsewhere": [],
             })
         );
 
