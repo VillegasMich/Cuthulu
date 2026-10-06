@@ -20,6 +20,9 @@ start/stop/restart work. See the [roadmap](docs/ROADMAP.md).
   network and disk throughput (optionally top processes), read straight from
   `/proc` and sampled only while someone is watching
 - Per-service TODO notes, kept in one JSON file (no database)
+- Notifications: email and desktop alerts when a watched service goes down
+  (bell per service), an email when Cuthulu stops, and a healthchecks.io
+  heartbeat — see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#notifications)
 - Light and dark themes, keyboard driven, dense terminal-style UI
 - Scales from a handful to hundreds of services (event-driven, no polling)
 - Single static binary in a `scratch` image
@@ -46,7 +49,7 @@ cargo clippy --all-targets -- -D warnings
 ```
 
 Keyboard: `/` filter · `j`/`k` move · `enter` open · `s` start/stop ·
-`r` restart · `a` show stopped · `m` host panel · `t` theme · `esc` back · `?` help.
+`r` restart · `a` show stopped · `b` notify bell · `m` host panel · `t` theme · `esc` back · `?` help.
 
 ## Docs
 

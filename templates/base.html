@@ -26,6 +26,8 @@
     {% block topbar %}{% endblock %}
     <span class="spacer"></span>
     {% if read_only %}<span class="tag" title="CUTHULU_READ_ONLY is set">read-only</span>{% endif %}
+    <button id="notify" class="btn icon" type="button" title="notifications" aria-label="notifications"
+            aria-haspopup="dialog" hidden></button>
     <span id="conn" class="conn" data-state="pending">docker: connecting</span>
     <button id="theme" class="btn icon" type="button" title="toggle theme (t)" aria-label="toggle theme (t)">
       <svg class="ico sun" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
@@ -58,10 +60,17 @@
       <tr><td><kbd>f</kbd></td><td>toggle log follow</td></tr>
       <tr><td><kbd>m</kbd></td><td>toggle host panel</td></tr>
       <tr><td><kbd>a</kbd></td><td>show / hide stopped</td></tr>
+      <tr><td><kbd>b</kbd></td><td>notify when selected goes down</td></tr>
       <tr><td><kbd>t</kbd></td><td>toggle theme</td></tr>
       <tr><td><kbd>esc</kbd></td><td>clear / back</td></tr>
       <tr><td><kbd>?</kbd></td><td>this help</td></tr>
     </table>
+    <form method="dialog"><button class="btn">close</button></form>
+  </dialog>
+
+  <dialog id="notify-dialog" class="help notify-dlg" aria-labelledby="notify-title">
+    <h2 id="notify-title">notifications</h2>
+    <div id="notify-body"></div>
     <form method="dialog"><button class="btn">close</button></form>
   </dialog>
 </body>

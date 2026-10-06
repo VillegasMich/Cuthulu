@@ -200,7 +200,7 @@ impl Notifier {
         TestReport { email, healthcheck }
     }
 
-    /// Reports a clean shutdown by email, within [`SHUTDOWN_BUDGET`].
+    /// Reports a clean shutdown by email, giving up after 8 s.
     pub async fn stopped(&self) {
         let Some(mailer) = &self.mailer else {
             return;

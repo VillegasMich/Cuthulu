@@ -1,3 +1,5 @@
 /target
 # CUTHULU_DATA_DIR default for `cargo run`
 /data
+# Notification secrets for compose (see .env.example)
+.env

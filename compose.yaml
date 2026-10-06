@@ -14,9 +14,16 @@ services:
       - /proc:/host/proc:ro
       # Only with CUTHULU_SYSTEM_PROCESSES: resolve process uids to user names.
       # - /etc/passwd:/etc/passwd:ro
-      - cuthulu-data:/data # todos.json; a named volume keeps the image's 65532 owner
+      - cuthulu-data:/data # todos.json, notify.json; a named volume keeps the image's 65532 owner
     group_add:
       - "${DOCKER_GID:?set DOCKER_GID to the gid of /var/run/docker.sock}"
+    # Notification settings and secrets (SMTP, healthcheck URL): copy
+    # .env.example to .env. Optional; never commit .env.
+    env_file:
+      - path: .env
+        required: false
+    # Room for the shutdown email after SIGTERM (it gives up after 8 s).
+    stop_grace_period: 15s
     environment:
       RUST_LOG: info
       CUTHULU_PROC_DIR: /host/proc

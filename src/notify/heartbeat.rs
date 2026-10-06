@@ -17,6 +17,9 @@ use tracing::{debug, info, warn};
 use crate::config::HealthcheckConfig;
 
 const PING_TIMEOUT: Duration = Duration::from_secs(10);
+/// After a skipped ping (provider disconnected, e.g. right after startup),
+/// look again this soon instead of waiting a whole interval.
+const SKIP_RETRY: Duration = Duration::from_secs(5);
 /// Bytes of the response body read; healthchecks.io answers `OK`.
 const BODY_LIMIT: u64 = 4096;
 
@@ -103,6 +106,7 @@ pub async fn run<F, Fut>(
         }
         if !alive() {
             debug!("provider disconnected; healthcheck ping skipped");
+            tick.reset_after(SKIP_RETRY.min(interval));
             continue;
         }
         let result = tokio::select! {
@@ -183,6 +187,10 @@ mod tests {
         let paused = pings.load(Ordering::SeqCst);
         tokio::time::sleep(Duration::from_millis(80)).await;
         assert_eq!(pings.load(Ordering::SeqCst), paused, "no pings while dead");
+
+        alive.store(true, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert!(pings.load(Ordering::SeqCst) > paused, "pings resume");
 
         cancel.cancel();
         task.await.unwrap();

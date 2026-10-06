@@ -52,8 +52,16 @@ Each phase should end in something runnable. Tick items as they land.
 - [x] Top processes by CPU / memory, opt-in via `CUTHULU_SYSTEM_PROCESSES`
 - [x] `CUTHULU_PROC_DIR`, `CUTHULU_SYSTEM_SECS`; compose mounts the host's `/proc` read-only
 
+## Notifications ✓
+- [x] Healthcheck heartbeat (`CUTHULU_HEALTHCHECK_URL`, e.g. healthchecks.io)
+- [x] Shutdown email on SIGTERM / SIGINT (`CUTHULU_SMTP_*`, `CUTHULU_NOTIFY_*`)
+- [x] Down / back-up emails for watched services: event-driven, settle, cooldown, own stops silent
+- [x] Desktop notifications in the browser, in-page flash fallback
+- [x] Bell toggle per service + global switch, persisted in `CUTHULU_DATA_DIR/notify.json`
+- [x] `send test` action (`POST /api/notify/test`)
+
 ## Later
 - CPU / memory stats per service (on demand, only for visible rows)
 - systemd provider
-- Desktop / webhook notifications on crash
+- Webhook notifications (ntfy, Slack, …) on crash
 - Multiple Docker hosts

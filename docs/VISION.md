@@ -62,7 +62,7 @@ their own Linux workstation or home server.
 | 8 | group services by Docker Compose project                       | Next  |
 | 9 | see CPU / memory usage per service                             | Next  |
 | 10| monitor non-Docker services (systemd units, plain processes)   | Later |
-| 11| get a desktop notification when a service dies                 | Later |
+| 11| get a desktop notification / email when a watched service dies | Done  |
 | 12| see host CPU / memory / network at a glance                    | Done  |
 
 ## Success criteria for the MVP

@@ -530,3 +530,41 @@ button.todo-check:hover:not(:disabled) { color: var(--accent); }
 .log.colors .lv-info { color: var(--ok); }
 .log.colors .lv-warn { color: var(--warn); }
 .log.colors .lv-error { color: var(--err); }
+
+/* ── notifications ───────────────────────────────────────── */
+
+/* bell toggle at the end of a services row: shown on hover/focus, always when watched */
+.bell {
+  display: inline-flex;
+  vertical-align: -2px;
+  margin-left: 8px;
+  padding: 0;
+  font: inherit;
+  color: var(--muted);
+  background: none;
+  border: 0;
+  visibility: hidden;
+}
+.bell .ico, .bell-btn .ico { width: 12px; height: 12px; }
+button.bell { cursor: pointer; }
+button.bell:hover { color: var(--text); }
+.services tr:hover .bell,
+.services tr.sel .bell,
+.services tr:focus-within .bell,
+.bell.on { visibility: visible; }
+.bell.on, button.bell.on:hover { color: var(--accent); }
+body.notify-off .bell.on { color: var(--muted); }
+@media (hover: none) {
+  .bell { visibility: visible; }
+}
+
+.bell-btn { display: inline-flex; align-items: center; gap: 4px; }
+body.notify-off .bell-btn.on { border-color: var(--border); color: var(--muted); }
+.bell-text { align-self: center; }
+
+
+.notify-dlg { max-width: min(64ch, calc(100vw - 32px)); }
+.notify-kv { grid-template-columns: 12ch 1fr; }
+.notify-kv .btn { margin-left: 8px; padding: 0 6px; }
+.notify-test { margin-bottom: 6px; }
+.notify-dlg p { margin: 8px 0 0; }
