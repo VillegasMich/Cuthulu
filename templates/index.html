@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+
+{% block page %}index{% endblock %}
+
+{% block topbar %}
+<span id="counts" class="counts muted"></span>
+{% endblock %}
+
+{% block main %}
+<div class="toolbar">
+  <input id="filter" class="input" type="search" placeholder="filter name, image, project  [/]"
+         autocomplete="off" spellcheck="false" aria-label="filter services">
+  <select id="state-filter" class="input" aria-label="state filter">
+    <option value="">all states</option>
+    <option value="up">running</option>
+    <option value="down">not running</option>
+  </select>
+</div>
+
+<table class="services">
+  <thead>
+    <tr>
+      <th class="c-state">state</th>
+      <th>name</th>
+      <th class="c-group">project</th>
+      <th class="c-image">image</th>
+      <th class="c-ports">ports</th>
+      <th class="c-up num">uptime</th>
+      <th class="c-act"><span class="sr">actions</span></th>
+    </tr>
+  </thead>
+  <tbody id="rows">
+    <tr class="placeholder"><td colspan="7">watching…</td></tr>
+  </tbody>
+</table>
+{% endblock %}

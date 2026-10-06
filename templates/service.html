@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+
+{% block title %}{{ d.service.name }} · cuthulu{% endblock %}
+
+{% block page %}service{% endblock %}
+
+{% block topbar %}
+<span class="crumb">/ {{ d.service.name }}</span>
+{% endblock %}
+
+{% block main %}
+<div class="detail" id="detail" data-id="{{ d.service.id }}" data-self="{{ d.service.is_self }}">
+  <section class="meta">
+    <h1>{{ d.service.name }}</h1>
+    <div class="state-line" id="state-line"></div>
+    <div class="actions" id="actions"></div>
+
+    <dl class="kv">
+      <dt>image</dt><dd>{% if let Some(image) = d.service.image %}{{ image }}{% else %}—{% endif %}</dd>
+      <dt>id</dt><dd title="{{ d.service.id }}">{{ self.short_id() }}</dd>
+      {% if let Some(group) = d.service.group %}<dt>project</dt><dd>{{ group }}</dd>{% endif %}
+      <dt>created</dt><dd class="time" data-time="{% if let Some(c) = d.created_at %}{{ c }}{% endif %}">—</dd>
+      <dt>command</dt><dd class="wrap">{% if let Some(cmd) = d.command %}{{ cmd }}{% else %}—{% endif %}</dd>
+      <dt>restart</dt>
+      <dd>{% if let Some(p) = d.restart_policy %}{{ p }}{% else %}no{% endif %} · {{ d.restart_count }} restarts</dd>
+      <dt>ports</dt>
+      <dd>{% for p in d.service.ports %}<div>{{ p }}</div>{% else %}—{% endfor %}</dd>
+      <dt>networks</dt>
+      <dd>{% for n in d.networks %}<div>{{ n }}</div>{% else %}—{% endfor %}</dd>
+      <dt>mounts</dt>
+      <dd>
+        {% for m in d.mounts %}
+        <div class="wrap">{{ m.source }} → {{ m.destination }}{% if m.read_only %} <span class="muted">ro</span>{% endif %}</div>
+        {% else %}—{% endfor %}
+      </dd>
+      {% if let Some(err) = d.error %}<dt>error</dt><dd class="err wrap">{{ err }}</dd>{% endif %}
+    </dl>
+
+    <details>
+      <summary>env <span class="muted">({{ d.env_keys.len() }} keys, values hidden)</span></summary>
+      <ul class="plain">{% for k in d.env_keys %}<li>{{ k }}</li>{% endfor %}</ul>
+    </details>
+    <details>
+      <summary>labels <span class="muted">({{ d.labels.len() }})</span></summary>
+      <dl class="kv small">
+        {% for (k, v) in d.labels %}<dt class="wrap">{{ k }}</dt><dd class="wrap">{{ v }}</dd>{% endfor %}
+      </dl>
+    </details>
+  </section>
+
+  <section class="logs">
+    <div class="logbar">
+      <input id="log-filter" class="input" type="search" placeholder="filter logs"
+             autocomplete="off" spellcheck="false" aria-label="filter logs">
+      <label class="check"><input id="log-ts" type="checkbox"> time</label>
+      <label class="check"><input id="log-wrap" type="checkbox" checked> wrap</label>
+      <button id="log-follow" class="btn on" type="button" title="follow (f)">follow</button>
+      <button id="log-clear" class="btn" type="button">clear</button>
+      <span class="spacer"></span>
+      <span id="log-status" class="muted"></span>
+    </div>
+    <div id="log" class="log wrap-lines" tabindex="0" aria-label="logs"></div>
+  </section>
+</div>
+{% endblock %}
