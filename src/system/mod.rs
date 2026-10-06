@@ -115,6 +115,9 @@ pub struct SystemMonitor {
     proc_dir: PathBuf,
     interval: Duration,
     users: HashMap<u32, String>,
+    /// `sys/kernel/hostname` answers for the *reader's* UTS namespace, so
+    /// inside a container it is the container's name, not the host's.
+    read_hostname: bool,
     tx: broadcast::Sender<Update>,
     state: Mutex<State>,
     /// Previous raw read, the baseline for the next CPU% delta.
@@ -134,6 +137,7 @@ impl SystemMonitor {
             proc_dir,
             interval,
             users,
+            read_hostname: !Path::new("/.dockerenv").exists(),
             tx: broadcast::channel(CAPACITY).0,
             state: Mutex::default(),
             prev: Mutex::default(),
@@ -230,8 +234,9 @@ impl SystemMonitor {
         let load = proc::parse_loadavg(&self.read("loadavg")?)?;
         let uptime = proc::parse_uptime(&self.read("uptime")?)?;
         let hostname = self
-            .read("sys/kernel/hostname")
-            .ok()
+            .read_hostname
+            .then(|| self.read("sys/kernel/hostname").ok())
+            .flatten()
             .map(|h| h.trim().to_owned())
             .filter(|h| !h.is_empty());
 

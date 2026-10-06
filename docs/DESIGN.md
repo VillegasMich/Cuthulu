@@ -88,7 +88,7 @@ in `localStorage` (`cuthulu.sys.open`), as is the sort (`cuthulu.sys.mem`).
   Mem [||||||||||||||||||           5.8G/15.5G]
   Swp [|                             0.1G/2.0G]
   Load 1.12 0.98 0.80
-  Tasks 312, 1708 thr; 2 running
+  Tasks 312, 1708 threads; 2 running
   Up    3d 4h
 ```
 

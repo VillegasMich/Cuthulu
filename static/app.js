@@ -620,7 +620,7 @@ function initSystem() {
         el("span", { class: `lv-${level((s.load[0] / ncpu) * 100, 70, 100)}` }, s.load[0].toFixed(2)),
         ` ${s.load[1].toFixed(2)} ${s.load[2].toFixed(2)}`,
       ),
-      el("div", {}, k("Tasks "), `${s.tasks}, ${s.threads} thr; ${s.running} running`),
+      el("div", {}, k("Tasks "), `${s.tasks}, ${s.threads} threads; ${s.running} running`),
       el("div", {}, k("Up    "), fmtDur(s.uptime_secs * 1000)),
     );
 

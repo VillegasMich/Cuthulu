@@ -198,7 +198,8 @@ source and has no actions. `src/system/` reads procfs directly — no PTY, no
 - **What is read:** `stat` (aggregate + per-core CPU ticks), `meminfo`
   (used = `MemTotal − MemAvailable`, falling back to htop's
   free/buffers/cache formula on old kernels), `loadavg` (load, runnable and
-  total threads), `uptime`, `sys/kernel/hostname`, and per pid `stat`
+  total threads), `uptime`, `sys/kernel/hostname` (skipped inside a Docker
+  container, where it names the container), and per pid `stat`
   (utime+stime, start time) and `status` (uid, `VmRSS`). `cmdline` is read
   only for the processes that make the top lists. Uids are named from
   `/etc/passwd` when it is readable (read once at startup).
