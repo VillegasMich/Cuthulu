@@ -40,6 +40,7 @@ Each phase should end in something runnable. Tick items as they land.
 - [ ] Optional `CUTHULU_AUTH_TOKEN`
 - [ ] Render ANSI colors in logs instead of stripping them
 - [ ] Download logs
+- [x] Per-service TODO list on the detail page (`CUTHULU_DATA_DIR/todos.json`)
 
 ## Later
 - CPU / memory stats per service (on demand, only for visible rows)
