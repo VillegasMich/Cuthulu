@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}cuthulu{% endblock %}</title>
+  <link rel="icon" href="/static/eye.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/theme.js"></script>
+  <script src="/static/app.js" defer></script>
+</head>
+<body data-page="{% block page %}{% endblock %}" data-read-only="{{ read_only }}">
+  <header class="topbar">
+    <a class="brand" href="/" title="all services">
+      <svg class="eye" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+        <path d="M1.5 12C4.6 6.6 8 4.5 12 4.5s7.4 2.1 10.5 7.5c-3.1 5.4-6.5 7.5-10.5 7.5S4.6 17.4 1.5 12Z"/>
+        <circle class="pupil" cx="12" cy="12" r="3.3"/>
+      </svg>
+      <span>cuthulu</span>
+    </a>
+    {% block topbar %}{% endblock %}
+    <span class="spacer"></span>
+    {% if read_only %}<span class="tag" title="CUTHULU_READ_ONLY is set">read-only</span>{% endif %}
+    <span id="conn" class="conn" data-state="pending">docker: connecting</span>
+    <button id="theme" class="btn" type="button" title="toggle theme (t)">theme</button>
+  </header>
+
+  <main>{% block main %}{% endblock %}</main>
+
+  <footer class="foot">
+    <span>cuthulu v{{ version }}</span>
+    <span><kbd>?</kbd> shortcuts</span>
+  </footer>
+
+  <div id="flash" class="flash" role="status" aria-live="polite" hidden></div>
+
+  <dialog id="help" class="help">
+    <h2>keyboard</h2>
+    <table>
+      <tr><td><kbd>/</kbd></td><td>filter</td></tr>
+      <tr><td><kbd>j</kbd> <kbd>k</kbd></td><td>move selection</td></tr>
+      <tr><td><kbd>enter</kbd> <kbd>l</kbd></td><td>open service / logs</td></tr>
+      <tr><td><kbd>s</kbd></td><td>start / stop selected</td></tr>
+      <tr><td><kbd>r</kbd></td><td>restart selected</td></tr>
+      <tr><td><kbd>f</kbd></td><td>toggle log follow</td></tr>
+      <tr><td><kbd>t</kbd></td><td>toggle theme</td></tr>
+      <tr><td><kbd>esc</kbd></td><td>clear / back</td></tr>
+      <tr><td><kbd>?</kbd></td><td>this help</td></tr>
+    </table>
+    <form method="dialog"><button class="btn">close</button></form>
+  </dialog>
+</body>
+</html>

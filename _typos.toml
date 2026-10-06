@@ -1,0 +1,8 @@
+[files]
+extend-exclude = ["static/fonts/*", "*.svg"]
+
+[default.extend-words]
+# Project name, deliberately spelled this way.
+cuthulu = "cuthulu"
+# Author name.
+villegas = "villegas"
