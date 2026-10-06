@@ -77,6 +77,10 @@ pub async fn act(
             "cuthulu is running in read-only mode".to_owned(),
         ));
     }
+    if let Some(service) = st.registry.get(&id) {
+        // A stop asked for here is not an outage worth an email.
+        st.notifier.expect(&service.name);
+    }
     Ok(Json(st.registry.act(&id, action).await?))
 }
 

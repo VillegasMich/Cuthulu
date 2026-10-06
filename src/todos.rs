@@ -222,7 +222,7 @@ fn validate(text: &str) -> Result<String, TodoError> {
 
 /// Writes `bytes` to a temporary file next to `path` and renames it over
 /// `path`, so readers see either the old or the new file, never half of one.
-fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(dir)?;
     let tmp = path.with_extension("json.tmp");
@@ -243,7 +243,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-fn now() -> String {
+pub(crate) fn now() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
@@ -251,7 +251,7 @@ fn now() -> String {
 }
 
 /// Formats Unix seconds as `YYYY-MM-DDTHH:MM:SSZ`.
-fn rfc3339(secs: u64) -> String {
+pub(crate) fn rfc3339(secs: u64) -> String {
     let (days, rem) = (secs / 86_400, secs % 86_400);
     // Civil-from-days, H. Hinnant: http://howardhinnant.github.io/date_algorithms.html
     let z = days + 719_468;

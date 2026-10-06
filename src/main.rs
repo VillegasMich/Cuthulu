@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use cuthulu::config::Config;
+use cuthulu::notify::Notifier;
 use cuthulu::providers::docker::DockerProvider;
 use cuthulu::registry::Registry;
 use cuthulu::server::{self, AppState};
@@ -65,7 +66,10 @@ async fn run() -> anyhow::Result<()> {
     let registry = Registry::new(vec![Arc::new(docker)]);
     let todos = Arc::new(TodoStore::open(&config.data_dir));
     let shutdown = CancellationToken::new();
-    let watchers = registry.spawn(config.reconcile_interval, &shutdown);
+    let notifier = Notifier::new(&config);
+    // Before the registry starts, so the first listing seeds the alert state.
+    let mut tasks = notifier.spawn(&registry, &shutdown);
+    tasks.extend(registry.spawn(config.reconcile_interval, &shutdown));
 
     let listener = tokio::net::TcpListener::bind(config.bind)
         .await
@@ -84,15 +88,17 @@ async fn run() -> anyhow::Result<()> {
         shutdown: shutdown.clone(),
         system,
         todos,
+        notifier: Arc::clone(&notifier),
     });
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal(shutdown.clone()))
         .await?;
 
     shutdown.cancel();
-    for w in watchers {
-        w.await?;
+    for t in tasks {
+        t.await?;
     }
+    notifier.stopped().await;
     info!("bye");
     Ok(())
 }

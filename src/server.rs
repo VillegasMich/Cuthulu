@@ -10,6 +10,7 @@ use axum::routing::get;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::Config;
+use crate::notify::Notifier;
 use crate::registry::Registry;
 use crate::system::SystemMonitor;
 use crate::todos::TodoStore;
@@ -25,6 +26,8 @@ pub struct AppState {
     pub system: Arc<SystemMonitor>,
     /// Per-service TODO items (`CUTHULU_DATA_DIR/todos.json`).
     pub todos: Arc<TodoStore>,
+    /// Watched services, alerts, heartbeat (`CUTHULU_DATA_DIR/notify.json`).
+    pub notifier: Arc<Notifier>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -99,6 +102,10 @@ mod tests {
             todos: Arc::new(TodoStore::open(std::path::Path::new(
                 "/nonexistent/cuthulu",
             ))),
+            notifier: Notifier::new(&Config {
+                data_dir: "/nonexistent/cuthulu".into(),
+                ..Config::default()
+            }),
         });
         (app, registry)
     }
@@ -286,6 +293,10 @@ mod tests {
             todos: Arc::new(TodoStore::open(std::path::Path::new(
                 "/nonexistent/cuthulu",
             ))),
+            notifier: Notifier::new(&Config {
+                data_dir: "/nonexistent/cuthulu".into(),
+                ..Config::default()
+            }),
         });
         (app, system)
     }

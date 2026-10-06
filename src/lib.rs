@@ -3,6 +3,7 @@
 pub mod api;
 pub mod config;
 pub mod model;
+pub mod notify;
 pub mod providers;
 pub mod registry;
 pub mod server;

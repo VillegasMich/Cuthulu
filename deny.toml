@@ -17,12 +17,16 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
     "BSD-3-Clause",
     "Unicode-3.0",
+    # TLS for notifications (rustls, ring, webpki, Mozilla roots) and lettre's quoted_printable.
+    "ISC",
+    "CDLA-Permissive-2.0",
+    "0BSD",
 ]
 
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
-# Docker over a local unix socket needs no TLS; keep native crypto out.
+# TLS (SMTP, healthcheck pings) is rustls with bundled roots; keep native crypto out.
 deny = [
     { crate = "openssl-sys" },
     { crate = "native-tls" },
