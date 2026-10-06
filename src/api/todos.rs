@@ -141,6 +141,10 @@ mod tests {
             system: SystemMonitor::new(&config, shutdown.clone()),
             config: Arc::new(config),
             todos: Arc::new(TodoStore::open(todo_dir)),
+            notifier: crate::notify::Notifier::new(&Config {
+                data_dir: todo_dir.to_owned(),
+                ..Config::default()
+            }),
             shutdown,
             tailscale: Arc::new(crate::tailscale::tests::disabled()),
         })

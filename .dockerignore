@@ -4,3 +4,6 @@ target
 docs
 *.md
 !README.md
+.env
+.env.*
+data

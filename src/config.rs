@@ -1,8 +1,11 @@
 //! Runtime configuration, read from `CUTHULU_*` environment variables.
 
+use std::fmt;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
+
+use lettre::message::Mailbox;
 
 /// Hard upper bound for log history requested per stream.
 pub const MAX_LOG_TAIL: usize = 10_000;
@@ -27,8 +30,11 @@ pub struct Config {
     pub system_interval: Duration,
     /// Also list the busiest processes in the host panel.
     pub system_processes: bool,
-    /// Directory for state Cuthulu owns (`todos.json`).
+    /// Directory for state Cuthulu owns (`todos.json`, `notify.json`).
     pub data_dir: PathBuf,
+    /// Email and healthcheck settings (`CUTHULU_NOTIFY_*`, `CUTHULU_SMTP_*`,
+    /// `CUTHULU_HEALTHCHECK_*`).
+    pub notify: NotifyConfig,
     /// tailscaled's `LocalAPI` socket; `None` (set to empty) disables the lookup.
     pub tailscale_socket: Option<PathBuf>,
     /// Explicit Tailscale admin console URL for the topbar button.
@@ -55,6 +61,7 @@ impl Default for Config {
             system_interval: Duration::from_secs(2),
             system_processes: false,
             data_dir: PathBuf::from("data"),
+            notify: NotifyConfig::default(),
             tailscale_socket: Some(PathBuf::from("/var/run/tailscale/tailscaled.sock")),
             tailscale_url: None,
         }
@@ -136,6 +143,7 @@ impl Config {
                 parse_bool,
             )?,
             data_dir: get("CUTHULU_DATA_DIR").map_or(d.data_dir, PathBuf::from),
+            notify: parse_notify(&get)?,
             // Unlike the others, an empty value is meaningful here: it disables.
             tailscale_socket: match lookup("CUTHULU_TAILSCALE_SOCKET") {
                 None => d.tailscale_socket,
@@ -182,6 +190,301 @@ fn parse_bool(v: &str) -> Result<bool, String> {
         "0" | "false" | "no" | "off" => Ok(false),
         _ => Err("expected true or false".to_owned()),
     }
+}
+
+// ── notifications ──────────────────────────────────────────
+
+/// Default SMTP port: implicit TLS.
+pub const DEFAULT_SMTP_PORT: u16 = 465;
+/// Bounds (minutes) for the healthcheck interval and the alert cooldown.
+pub const NOTIFY_MINUTES: std::ops::RangeInclusive<u64> = 1..=1440;
+const DEFAULT_HEALTHCHECK_MINUTES: u64 = 5;
+const DEFAULT_COOLDOWN_MINUTES: u64 = 15;
+/// Display name on notification emails whose sender address has none.
+const EMAIL_SENDER_NAME: &str = "cuthulu";
+const REDACTED: &str = "[redacted]";
+
+/// Outgoing notifications. Both channels are `None` when unconfigured or
+/// when `CUTHULU_NOTIFY_ENABLED=false`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotifyConfig {
+    pub email: Option<EmailConfig>,
+    pub healthcheck: Option<HealthcheckConfig>,
+    /// Least time between two "down" emails for the same service.
+    pub cooldown: Duration,
+    /// Name for this machine in email subjects; `None` = detect.
+    pub host: Option<String>,
+}
+
+impl Default for NotifyConfig {
+    fn default() -> Self {
+        Self {
+            email: None,
+            healthcheck: None,
+            cooldown: Duration::from_secs(DEFAULT_COOLDOWN_MINUTES * 60),
+            host: None,
+        }
+    }
+}
+
+/// A value that must never be logged: `Debug` prints a placeholder.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Secret(String);
+
+impl Secret {
+    #[must_use]
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    #[must_use]
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for Secret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(REDACTED)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmailConfig {
+    pub smtp_host: String,
+    pub smtp_port: u16,
+    pub tls: SmtpTls,
+    pub credentials: Option<SmtpCredentials>,
+    pub from: Mailbox,
+    pub to: Mailbox,
+}
+
+/// How the SMTP connection is encrypted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmtpTls {
+    /// TLS from the first byte (port 465).
+    Implicit,
+    /// Plain connection upgraded with STARTTLS (port 587).
+    StartTls,
+    /// No encryption. Only allowed for a server on this machine (tests).
+    None,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SmtpCredentials {
+    pub username: String,
+    pub password: Secret,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HealthcheckConfig {
+    /// Ping URL. Whoever holds it can report Cuthulu as alive: kept secret.
+    pub url: Secret,
+    pub interval: Duration,
+}
+
+fn invalid(key: &'static str, value: &str, reason: &str) -> ConfigError {
+    ConfigError {
+        key,
+        value: value.to_owned(),
+        reason: reason.to_owned(),
+    }
+}
+
+fn parse_notify(
+    get: &impl Fn(&'static str) -> Option<String>,
+) -> Result<NotifyConfig, ConfigError> {
+    let minutes = |key: &'static str, default: u64| {
+        parse(
+            get(key),
+            key,
+            Duration::from_secs(default * 60),
+            |v| match v.parse::<u64>() {
+                Ok(n) if NOTIFY_MINUTES.contains(&n) => Ok(Duration::from_secs(n * 60)),
+                _ => Err(format!(
+                    "expected minutes between {} and {}",
+                    NOTIFY_MINUTES.start(),
+                    NOTIFY_MINUTES.end()
+                )),
+            },
+        )
+    };
+    let cooldown = minutes("CUTHULU_NOTIFY_COOLDOWN_MINUTES", DEFAULT_COOLDOWN_MINUTES)?;
+    let interval = minutes(
+        "CUTHULU_HEALTHCHECK_INTERVAL_MINUTES",
+        DEFAULT_HEALTHCHECK_MINUTES,
+    )?;
+    let host = get("CUTHULU_NOTIFY_HOST").map(|h| h.trim().to_owned());
+    let enabled = parse(
+        get("CUTHULU_NOTIFY_ENABLED"),
+        "CUTHULU_NOTIFY_ENABLED",
+        true,
+        parse_bool,
+    )?;
+    // Validate everything even when disabled, so turning it back on cannot
+    // surface a typo made long ago.
+    let email = parse_email(get)?;
+    let healthcheck = parse_healthcheck(get, interval)?;
+    Ok(NotifyConfig {
+        email: email.filter(|_| enabled),
+        healthcheck: healthcheck.filter(|_| enabled),
+        cooldown,
+        host,
+    })
+}
+
+fn parse_email(
+    get: &impl Fn(&'static str) -> Option<String>,
+) -> Result<Option<EmailConfig>, ConfigError> {
+    let Some(smtp_host) = get("CUTHULU_SMTP_HOST").map(|h| h.trim().to_owned()) else {
+        for key in [
+            "CUTHULU_NOTIFY_EMAIL_TO",
+            "CUTHULU_NOTIFY_EMAIL_FROM",
+            "CUTHULU_SMTP_USERNAME",
+            "CUTHULU_SMTP_PASSWORD",
+        ] {
+            if let Some(value) = get(key) {
+                let shown = if key == "CUTHULU_SMTP_PASSWORD" {
+                    REDACTED
+                } else {
+                    &value
+                };
+                return Err(invalid(
+                    key,
+                    shown,
+                    "has no effect without CUTHULU_SMTP_HOST",
+                ));
+            }
+        }
+        return Ok(None);
+    };
+
+    let smtp_port = parse(
+        get("CUTHULU_SMTP_PORT"),
+        "CUTHULU_SMTP_PORT",
+        DEFAULT_SMTP_PORT,
+        |v| match v.parse::<u16>() {
+            Ok(p) if p != 0 => Ok(p),
+            _ => Err("expected a port number".to_owned()),
+        },
+    )?;
+
+    let tls = parse_tls(
+        &smtp_host,
+        smtp_port,
+        get("CUTHULU_SMTP_TLS")
+            .map(|v| v.trim().to_ascii_lowercase())
+            .as_deref(),
+    )?;
+
+    let credentials = match (get("CUTHULU_SMTP_USERNAME"), get("CUTHULU_SMTP_PASSWORD")) {
+        (Some(username), Some(password)) => Some(SmtpCredentials {
+            username: username.trim().to_owned(),
+            password: Secret::new(password),
+        }),
+        (None, None) => None,
+        (Some(username), None) => {
+            return Err(invalid(
+                "CUTHULU_SMTP_USERNAME",
+                &username,
+                "CUTHULU_SMTP_PASSWORD is not set",
+            ));
+        }
+        (None, Some(_)) => {
+            return Err(invalid(
+                "CUTHULU_SMTP_PASSWORD",
+                REDACTED,
+                "CUTHULU_SMTP_USERNAME is not set",
+            ));
+        }
+    };
+
+    let from = match get("CUTHULU_NOTIFY_EMAIL_FROM") {
+        Some(value) => parse_mailbox("CUTHULU_NOTIFY_EMAIL_FROM", &value)?,
+        None => credentials
+            .as_ref()
+            .and_then(|c| c.username.parse::<Mailbox>().ok())
+            .ok_or_else(|| {
+                invalid(
+                    "CUTHULU_NOTIFY_EMAIL_FROM",
+                    "",
+                    "required when CUTHULU_SMTP_USERNAME is not an email address",
+                )
+            })?,
+    };
+    let from = match from.name {
+        Some(_) => from,
+        None => Mailbox::new(Some(EMAIL_SENDER_NAME.to_owned()), from.email),
+    };
+    let to = match get("CUTHULU_NOTIFY_EMAIL_TO") {
+        Some(value) => parse_mailbox("CUTHULU_NOTIFY_EMAIL_TO", &value)?,
+        None => Mailbox::new(None, from.email.clone()),
+    };
+
+    Ok(Some(EmailConfig {
+        smtp_host,
+        smtp_port,
+        tls,
+        credentials,
+        from,
+        to,
+    }))
+}
+
+/// Port 465 means implicit TLS, any other STARTTLS, unless set explicitly.
+fn parse_tls(host: &str, port: u16, value: Option<&str>) -> Result<SmtpTls, ConfigError> {
+    match value {
+        None if port == 465 => Ok(SmtpTls::Implicit),
+        Some("implicit") => Ok(SmtpTls::Implicit),
+        None | Some("starttls") => Ok(SmtpTls::StartTls),
+        Some("none") if is_loopback(host) => Ok(SmtpTls::None),
+        Some("none") => Err(invalid(
+            "CUTHULU_SMTP_TLS",
+            "none",
+            "only allowed when CUTHULU_SMTP_HOST is this machine (localhost, 127.0.0.1, ::1)",
+        )),
+        Some(other) => Err(invalid(
+            "CUTHULU_SMTP_TLS",
+            other,
+            "expected implicit, starttls or none",
+        )),
+    }
+}
+
+fn is_loopback(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .trim_matches(['[', ']'])
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+fn parse_mailbox(key: &'static str, value: &str) -> Result<Mailbox, ConfigError> {
+    value
+        .trim()
+        .parse()
+        .map_err(|_| invalid(key, value, "expected an email address"))
+}
+
+fn parse_healthcheck(
+    get: &impl Fn(&'static str) -> Option<String>,
+    interval: Duration,
+) -> Result<Option<HealthcheckConfig>, ConfigError> {
+    let Some(url) = get("CUTHULU_HEALTHCHECK_URL").map(|u| u.trim().to_owned()) else {
+        return Ok(None);
+    };
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        // The URL is secret: never echo it back.
+        return Err(invalid(
+            "CUTHULU_HEALTHCHECK_URL",
+            REDACTED,
+            "expected an http(s) URL, e.g. https://hc-ping.com/<uuid>",
+        ));
+    }
+    Ok(Some(HealthcheckConfig {
+        url: Secret::new(url),
+        interval,
+    }))
 }
 
 #[cfg(test)]
@@ -250,6 +553,166 @@ mod tests {
         assert!(from(&[("CUTHULU_SYSTEM_SECS", "0")]).is_err());
         assert!(from(&[("CUTHULU_SYSTEM_SECS", "61")]).is_err());
         assert!(from(&[("CUTHULU_SYSTEM_SECS", "x")]).is_err());
+    }
+
+    const SMTP: &[(&str, &str)] = &[
+        ("CUTHULU_SMTP_HOST", "smtp.gmail.com"),
+        ("CUTHULU_SMTP_USERNAME", "me@gmail.com"),
+        ("CUTHULU_SMTP_PASSWORD", "app-password"),
+    ];
+
+    fn with(
+        base: &[(&'static str, &'static str)],
+        extra: &[(&'static str, &'static str)],
+    ) -> Result<Config, ConfigError> {
+        let all: Vec<_> = base.iter().chain(extra).copied().collect();
+        from(&all)
+    }
+
+    #[test]
+    fn notifications_off_when_unconfigured() {
+        let n = from(&[]).unwrap().notify;
+        assert_eq!(n, NotifyConfig::default());
+        assert!(n.email.is_none() && n.healthcheck.is_none());
+        assert_eq!(n.cooldown, Duration::from_secs(15 * 60));
+    }
+
+    #[test]
+    fn email_defaults_follow_the_reference() {
+        let e = from(SMTP).unwrap().notify.email.unwrap();
+        assert_eq!(e.smtp_port, 465);
+        assert_eq!(e.tls, SmtpTls::Implicit);
+        assert_eq!(e.from.to_string(), "cuthulu <me@gmail.com>");
+        assert_eq!(e.to.to_string(), "me@gmail.com");
+        assert_eq!(e.credentials.unwrap().password.expose(), "app-password");
+
+        let e = with(
+            SMTP,
+            &[
+                ("CUTHULU_SMTP_PORT", "587"),
+                ("CUTHULU_NOTIFY_EMAIL_FROM", "Box <box@example.com>"),
+                ("CUTHULU_NOTIFY_EMAIL_TO", "ops@example.com"),
+            ],
+        )
+        .unwrap()
+        .notify
+        .email
+        .unwrap();
+        assert_eq!(e.tls, SmtpTls::StartTls);
+        assert_eq!(e.from.to_string(), "Box <box@example.com>");
+        assert_eq!(e.to.to_string(), "ops@example.com");
+    }
+
+    #[test]
+    fn plain_smtp_only_on_loopback() {
+        let local = from(&[
+            ("CUTHULU_SMTP_HOST", "127.0.0.1"),
+            ("CUTHULU_SMTP_PORT", "2525"),
+            ("CUTHULU_SMTP_TLS", "none"),
+            ("CUTHULU_NOTIFY_EMAIL_FROM", "a@example.com"),
+        ])
+        .unwrap();
+        let e = local.notify.email.unwrap();
+        assert_eq!(e.tls, SmtpTls::None);
+        assert!(e.credentials.is_none());
+        assert!(with(SMTP, &[("CUTHULU_SMTP_TLS", "none")]).is_err());
+        assert!(with(SMTP, &[("CUTHULU_SMTP_TLS", "ssl")]).is_err());
+    }
+
+    #[test]
+    fn rejects_incomplete_email_settings() {
+        // Settings that would silently do nothing.
+        assert!(from(&[("CUTHULU_NOTIFY_EMAIL_TO", "a@example.com")]).is_err());
+        assert!(
+            from(&[("CUTHULU_SMTP_HOST", "smtp.example.com")]).is_err(),
+            "no sender"
+        );
+        assert!(
+            from(&[
+                ("CUTHULU_SMTP_HOST", "smtp.example.com"),
+                ("CUTHULU_SMTP_USERNAME", "me@example.com"),
+            ])
+            .is_err(),
+            "no password"
+        );
+        assert!(with(SMTP, &[("CUTHULU_SMTP_PORT", "0")]).is_err());
+        assert!(with(SMTP, &[("CUTHULU_NOTIFY_EMAIL_TO", "not an address")]).is_err());
+    }
+
+    #[test]
+    fn secrets_never_show_in_errors_or_debug() {
+        let err = from(&[("CUTHULU_SMTP_PASSWORD", "hunter2")]).unwrap_err();
+        assert!(!err.to_string().contains("hunter2"), "{err}");
+        let err = from(&[("CUTHULU_HEALTHCHECK_URL", "hc-ping.com/secret-uuid")]).unwrap_err();
+        assert!(!err.to_string().contains("secret-uuid"), "{err}");
+
+        let c = with(
+            SMTP,
+            &[("CUTHULU_HEALTHCHECK_URL", "https://hc-ping.com/secret-uuid")],
+        )
+        .unwrap();
+        let debug = format!("{c:?}");
+        assert!(
+            !debug.contains("app-password") && !debug.contains("secret-uuid"),
+            "{debug}"
+        );
+    }
+
+    #[test]
+    fn healthcheck_settings() {
+        let h = from(&[("CUTHULU_HEALTHCHECK_URL", "https://hc-ping.com/abc")])
+            .unwrap()
+            .notify
+            .healthcheck
+            .unwrap();
+        assert_eq!(h.url.expose(), "https://hc-ping.com/abc");
+        assert_eq!(h.interval, Duration::from_secs(300));
+
+        let c = from(&[
+            ("CUTHULU_HEALTHCHECK_URL", "http://127.0.0.1:9/ping"),
+            ("CUTHULU_HEALTHCHECK_INTERVAL_MINUTES", "1"),
+            ("CUTHULU_NOTIFY_COOLDOWN_MINUTES", "60"),
+            ("CUTHULU_NOTIFY_HOST", "home-server"),
+        ])
+        .unwrap();
+        assert_eq!(
+            c.notify.healthcheck.unwrap().interval,
+            Duration::from_secs(60)
+        );
+        assert_eq!(c.notify.cooldown, Duration::from_secs(3600));
+        assert_eq!(c.notify.host.as_deref(), Some("home-server"));
+        for bad in ["0", "1441", "x"] {
+            assert!(
+                from(&[("CUTHULU_HEALTHCHECK_INTERVAL_MINUTES", bad)]).is_err(),
+                "{bad}"
+            );
+            assert!(
+                from(&[("CUTHULU_NOTIFY_COOLDOWN_MINUTES", bad)]).is_err(),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn master_switch_turns_everything_off_but_still_validates() {
+        let c = with(
+            SMTP,
+            &[
+                ("CUTHULU_HEALTHCHECK_URL", "https://hc-ping.com/abc"),
+                ("CUTHULU_NOTIFY_ENABLED", "false"),
+            ],
+        )
+        .unwrap();
+        assert!(c.notify.email.is_none() && c.notify.healthcheck.is_none());
+        assert!(
+            from(&[
+                ("CUTHULU_NOTIFY_ENABLED", "off"),
+                ("CUTHULU_SMTP_TLS", "x"),
+                ("CUTHULU_SMTP_HOST", "h")
+            ])
+            .is_err()
+        );
+        assert!(from(&[("CUTHULU_NOTIFY_ENABLED", "maybe")]).is_err());
     }
 
     #[test]

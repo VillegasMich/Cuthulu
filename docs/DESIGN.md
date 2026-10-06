@@ -94,7 +94,7 @@ stores an explicit choice in `localStorage` and sets `data-theme` on `<html>`.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│ [←] (◉) cuthulu   3 running · 1 stopped (hidden)     ● docker  [☾]  │
+│ [←] (◉) cuthulu   3 running · 1 stopped (hidden) [bell] ● docker [☾]│
 ├──────────────────────────────────────────────────────────────────────┤
 │ [/ filter…]   [ ] show stopped                                       │
 │ STATE    NAME                     IMAGE                      UPTIME  │
@@ -110,6 +110,8 @@ stores an explicit choice in `localStorage` and sets `data-theme` on `<html>`.
     keeps its slot, so the eye never shifts between pages.
   - The theme toggle shows the *current* theme: a sun in light, a moon in dark
     (pure CSS, so it also follows `prefers-color-scheme` live).
+  - Notifications (`.btn.icon`, before the connection state): a bell, struck
+    through when service alerts are off. Opens the notifications dialog.
   - Tailscale (left of the theme toggle, only when Tailscale is available): a
     link styled as `.btn.icon` with a three-node network glyph; opens this
     machine in the Tailscale admin console in a new tab. The tooltip names
@@ -141,6 +143,28 @@ stores an explicit choice in `localStorage` and sets `data-theme` on `<html>`.
   info `--ok`, debug/trace `--muted` — the keyword only, never the whole
   line. Colored spans override the stderr tint; the rest of an stderr line
   keeps it. A `color` checkbox turns all of it off (remembered).
+- Bell (notify) toggle: services rows get a 12px bell at the far right of
+  the actions cell — `--accent` when the service is watched (always
+  visible), otherwise `--muted` and shown on hover/focus like the row
+  actions. With alerts switched off globally, watched bells turn `--muted`.
+  The detail page has a `notify` text button with the bell after the
+  actions, `.on` (accent border) while watched. `b` toggles it. Read-only:
+  watched rows keep a static bell, the detail page says `notify: on|off`.
+  Cuthulu's own row has none.
+- Notifications dialog (same box as the help dialog): a `kv` list —
+  `alerts` (checkbox on/off), `watched` (names), `email` / `healthcheck`
+  (`configured` in `--ok`, or `off · <the env var to set>` in `--muted`;
+  never addresses or URLs), `browser` (permission state, `allow` button) —
+  then `send test` with a per-channel result line (`sent` `--ok`,
+  `failed: …` `--err`). Read-only shows the same, without controls.
+- Browser alert: a desktop notification `<name> is down` / `<state> ·
+  cuthulu` (`<state> · stopped from the dashboard` after a stop clicked
+  there); without permission the same text in the error flash.
+- "Restarts by itself": a service stopped from Cuthulu that something else
+  started again gets a `↻` (`--warn`, tooltip explains) before its name in
+  the table, ` · restarts by itself` (`--warn`) on the detail state line,
+  and an error flash suggesting to stop it at its source. No new color
+  tokens for any of this.
 - TODO list (detail view, left pane, below the metadata): heading
   `todo 2/5` (done/total, muted count; styled like the other sections), one line per item: `[ ]` / `[x]`
   text toggle (`--muted`, `--ok` when done), the text, and a small `del`
@@ -185,9 +209,9 @@ room. One component (`.split`, `splitter()` in `app.js`), used in three places:
 ## Icons
 
 Text labels win by default. The few icons (the eye, back arrow, sun/moon,
-the Tailscale network glyph) are hand-written inline SVGs: 14px in a
-24-unit viewBox, `fill: none`, `stroke: currentColor`, round caps/joins, no
-fills except the pupil. Icon
+bell, the Tailscale network glyph) are hand-written inline SVGs: 14px
+in a 24-unit viewBox, `fill: none`, `stroke: currentColor`, round
+caps/joins, no fills except the pupil. Icon
 buttons (`.btn.icon`) keep the box of a text `.btn`, are `--muted` until
 hover, and always carry `aria-label` + `title`.
 
@@ -249,6 +273,7 @@ in `localStorage` (`cuthulu.sys.open`), as is the process sort
 | `r`        | restart selected |
 | `m`        | collapse / expand the host panel (dashboard) |
 | `a`        | show / hide stopped services |
+| `b`        | notify when the selected service goes down (bell) |
 | `t`        | toggle theme |
 | `Esc`      | back (same as the back arrow) / close / clear filter / clear selection |
 | `?`        | show shortcuts |

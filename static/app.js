@@ -402,11 +402,15 @@ function connect() {
     changed();
   });
   on("upsert", (s) => {
+    const prev = store.services.get(s.id);
     store.services.set(s.id, s);
+    watchChange(prev, s);
     changed();
   });
   on("remove", (id) => {
+    const prev = store.services.get(id);
     store.services.delete(id);
+    watchChange(prev, null);
     changed();
   });
   on("status", (s) => {
@@ -434,6 +438,9 @@ async function act(s, action) {
   if (action === "restart" && s.is_self && !confirm("restart cuthulu itself? the page will reconnect.")) return;
 
   store.pending.add(s.id);
+  if (action !== "start") notify.acted.set(s.name, Date.now());
+  if (action === "stop") notify.stopped.set(s.name, Date.now());
+  else notify.stopped.delete(s.name);
   changed();
   try {
     const res = await fetch(`/api/services/${encodeURIComponent(s.id)}/${action}`, {
@@ -442,7 +449,10 @@ async function act(s, action) {
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(body.error || res.statusText);
+    const prev = store.services.get(body.id);
     store.services.set(body.id, body);
+    // The SSE upsert for this change will find the store already updated.
+    watchChange(prev, body);
     flash(`${action} ${s.name}: ok`);
   } catch (e) {
     flash(`${action} ${s.name}: ${e.message}`, true);
@@ -513,6 +523,7 @@ function initIndex() {
       el(
         "td",
         { title: s.name },
+        restartsTag(s),
         el("a", { href: svcUrl(s.id), onclick: (e) => e.stopPropagation() }, s.name),
         s.is_self ? el("span", { class: "self" }, "(this)") : null,
       ),
@@ -520,7 +531,7 @@ function initIndex() {
       el("td", { class: "c-image", title: s.image || "" }, ...imageParts(s.image)),
       el("td", { class: "c-ports" }, portsText(s.ports)),
       el("td", { class: "c-up num" }, uptime(s)),
-      el("td", { class: "c-act" }, ...actionButtons(s)),
+      el("td", { class: "c-act" }, ...actionButtons(s), bell(s)),
     );
   }
 
@@ -596,6 +607,7 @@ function initIndex() {
       case "s": toggleRun(current()); break;
       case "r": if (current()) act(current(), "restart"); break;
       case "a": showStopped.click(); break;
+      case "b": toggleWatch(current()); break;
       case "Escape": selected = null; changed(); break;
     }
   });
@@ -635,8 +647,9 @@ function initService() {
       el("span", { class: `st ${label.cls}` }, label.text),
       when ? el("span", { class: "muted" }, ` · ${when}`) : null,
       s.is_self ? el("span", { class: "muted" }, " · this is cuthulu") : null,
+      restartsTag(s, true),
     );
-    $("#actions").replaceChildren(...actionButtons(s, { all: true }));
+    fill($("#actions"), ...actionButtons(s, { all: true }), bell(s, { text: true }));
     for (const t of document.querySelectorAll(".time[data-time]")) {
       if (t.dataset.time) {
         t.textContent = fmtAgo(t.dataset.time);
@@ -792,6 +805,7 @@ function initService() {
       case "f": setFollow(!follow); break;
       case "s": toggleRun(service()); break;
       case "r": if (service()) act(service(), "restart"); break;
+      case "b": toggleWatch(service()); break;
       case "Escape": goBack(); break;
     }
   });
@@ -1130,6 +1144,316 @@ function initTodos() {
 
 if (page === "service") initTodos();
 
+// ── notifications (bells, desktop alerts, settings dialog) ─
+
+// A watched service must stay down this long before the browser alerts, so a
+// restart or `docker compose up` re-creating it stays quiet.
+const ALERT_SETTLE_MS = 10_000;
+// At most one desktop alert per service per minute.
+const ALERT_GAP_MS = 60_000;
+// A down flip this soon after a stop/restart clicked in this tab is labelled.
+const ACTED_MS = 60_000;
+// A service stopped here that is running again this soon, without a start
+// from here, was started by something else (systemd unit, restart policy).
+const RETURN_MS = 15 * 60_000;
+
+const notify = {
+  state: null, // GET /api/notify: {enabled, watched[], email, healthcheck, cooldown_minutes}
+  error: "",
+  watched: new Set(),
+  acted: new Map(), // name -> time of a stop/restart clicked here
+  stopped: new Map(), // name -> time of a stop clicked here (cleared by start/restart)
+  restarts: new Set(), // names started again by something else after a stop here
+  timers: new Map(), // name -> pending settle check
+  last: new Map(), // name -> time of the last alert
+  test: null, // last test report, shown in the dialog
+};
+
+/** Up for alerting purposes; mirrors classify() in src/notify/alerts.rs. */
+const alertUp = (s) => (s.state === "running" || s.state === "paused") && s.health !== "unhealthy";
+
+const watching = (name) => notify.state?.enabled === true && notify.watched.has(name);
+
+function svgIcon(paths) {
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  for (const [k, v] of Object.entries({ class: "ico", viewBox: "0 0 24 24", width: "14", height: "14", "aria-hidden": "true" })) {
+    svg.setAttribute(k, v);
+  }
+  for (const d of paths) {
+    const p = document.createElementNS(ns, "path");
+    p.setAttribute("d", d);
+    svg.append(p);
+  }
+  return svg;
+}
+
+const BELL = ["M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 2h-15Z", "M10 21h4"];
+const bellIcon = (off = false) => svgIcon(off ? [...BELL, "M3.5 3.5l17 17"] : BELL);
+
+function setNotifyState(st) {
+  notify.state = st;
+  notify.error = "";
+  notify.watched = new Set(st.watched);
+  for (const name of st.restarted_elsewhere || []) notify.restarts.add(name);
+  document.body.classList.toggle("notify-off", !st.enabled);
+  drawNotify();
+  changed();
+}
+
+async function notifyRequest(url, body) {
+  const init = body === undefined ? {} : {
+    method: "POST",
+    headers: { "X-Cuthulu": "1", "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  };
+  const res = await fetch(url, init);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || res.statusText);
+  return data;
+}
+
+async function loadNotify() {
+  try {
+    setNotifyState(await notifyRequest("/api/notify"));
+  } catch (e) {
+    notify.error = e.message;
+    drawNotify();
+  }
+}
+
+/** Asks for desktop notification permission; call from a user gesture only. */
+function askPermission() {
+  if (!("Notification" in window) || Notification.permission !== "default") return;
+  Notification.requestPermission().then(drawNotify, drawNotify);
+}
+
+async function toggleWatch(s) {
+  if (readOnly || !s || s.is_self || !notify.state) return;
+  const on = !notify.watched.has(s.name);
+  if (on) askPermission();
+  try {
+    setNotifyState(await notifyRequest(`/api/services/${encodeURIComponent(s.id)}/notify`, { watch: on }));
+    flash(on ? `notify when ${s.name} goes down` : `${s.name}: no notifications`);
+  } catch (e) {
+    flash(`notify ${s.name}: ${e.message}`, true);
+  }
+}
+
+/** Bell for a services row (icon only) or the detail page (`text`). */
+function bell(s, { text = false } = {}) {
+  if (s.is_self || !notify.state) return text ? null : el("span", { class: "bell" });
+  const on = notify.watched.has(s.name);
+  const what = on
+    ? notify.state.enabled ? "notifications on" : "watched, but notifications are off"
+    : "notifications off";
+  if (readOnly) {
+    if (text) return el("span", { class: "muted bell-text" }, `notify: ${on ? "on" : "off"}`);
+    return el("span", { class: on ? "bell on" : "bell", title: on ? what : null }, on ? bellIcon() : null);
+  }
+  return el(
+    "button",
+    {
+      class: [text ? "btn bell-btn" : "bell", on ? "on" : ""].join(" ").trim(),
+      type: "button",
+      "aria-pressed": String(on),
+      "aria-label": `notify when ${s.name} goes down`,
+      title: `${what} (b)`,
+      onclick: (e) => {
+        e.stopPropagation();
+        toggleWatch(s);
+      },
+    },
+    bellIcon(),
+    text ? "notify" : null,
+  );
+}
+
+/** Called for every registry change; schedules a settle check on a down flip. */
+function watchChange(prev, next) {
+  if (next && alertUp(next)) checkReturn(next);
+  // Down again (e.g. stopped with systemctl): the marker no longer applies.
+  if (prev && alertUp(prev) && !(next && alertUp(next))) notify.restarts.delete(prev.name);
+  if (!prev || prev.is_self || !alertUp(prev) || (next && alertUp(next))) return;
+  const name = prev.name;
+  if (!watching(name) || notify.timers.has(name)) return;
+  const mine = Date.now() - (notify.acted.get(name) || 0) < ACTED_MS;
+  notify.timers.set(
+    name,
+    setTimeout(() => {
+      notify.timers.delete(name);
+      const now = [...store.services.values()].find((s) => s.name === name);
+      if ((now && alertUp(now)) || !watching(name)) return;
+      // Gone (e.g. `docker run --rm`): say how it went down.
+      const detail = stateLabel(now || next || { state: "removed" }).text;
+      alertDown(name, mine ? `${detail} · stopped from the dashboard` : detail, now?.id);
+    }, ALERT_SETTLE_MS),
+  );
+}
+
+/** Warns when a service stopped here runs again without a start from here:
+ * a systemd unit or restart policy brought it back, so stopping the
+ * container cannot keep it down. Applies to every service, watched or not. */
+function checkReturn(s) {
+  const at = notify.stopped.get(s.name);
+  if (at == null) return;
+  notify.stopped.delete(s.name);
+  if (Date.now() - at > RETURN_MS) return;
+  notify.restarts.add(s.name);
+  flash(`${s.name} was started again by something else (a systemd unit or restart policy?) — stop it there to keep it down`, true);
+  changed();
+}
+
+/** Marker for a service that came back on its own after a stop here. */
+function restartsTag(s, long = false) {
+  if (!notify.restarts.has(s.name)) return null;
+  const why = "stopped from cuthulu, then started again by something else (systemd unit, restart policy) — stop it there";
+  return long
+    ? el("span", { class: "warn-text", title: why }, " · restarts by itself")
+    : el("span", { class: "warn-text", title: why, "aria-label": "restarts by itself" }, "↻ ");
+}
+
+/** Shows a desktop notification if allowed; false when it could not. */
+function desktop(title, body, tag, onclick) {
+  if (!("Notification" in window) || Notification.permission !== "granted") return false;
+  try {
+    const n = new Notification(title, { body, tag, icon: "/static/eye.svg" });
+    n.onclick = () => {
+      window.focus();
+      onclick?.();
+    };
+    return true;
+  } catch (_) {
+    return false; // some browsers only allow notifications from a service worker
+  }
+}
+
+function alertDown(name, detail, id) {
+  const t = Date.now();
+  if (t - (notify.last.get(name) || 0) < ALERT_GAP_MS) return;
+  notify.last.set(name, t);
+  const shown = desktop(`${name} is down`, `${detail} · cuthulu`, `cuthulu:${name}`, () => {
+    if (id) location.href = svcUrl(id);
+  });
+  if (!shown) flash(`${name} is down: ${detail}`, true);
+}
+
+function permissionText() {
+  if (!("Notification" in window)) return ["unavailable here (needs https or localhost)", false];
+  if (Notification.permission === "granted") return ["allowed", false];
+  if (Notification.permission === "denied") return ["blocked; alerts show in the page", false];
+  return ["not asked yet", true];
+}
+
+function drawNotify() {
+  const button = $("#notify");
+  const body = $("#notify-body");
+  const st = notify.state;
+  button.hidden = !st && !notify.error;
+  const off = !st || !st.enabled;
+  button.replaceChildren(bellIcon(off));
+  const label = notify.error ? "notifications: unavailable" : `notifications: ${off ? "off" : "on"}`;
+  button.title = label;
+  button.setAttribute("aria-label", label);
+
+  if (notify.error || !st) {
+    fill(body, el("p", { class: "err wrap" }, notify.error || "loading…"));
+    return;
+  }
+  const configured = (on, hint) => (on ? el("span", { class: "lv-ok" }, "configured") : el("span", { class: "muted" }, `off · ${hint}`));
+  const [perm, canAsk] = permissionText();
+  const rows = [
+    ["alerts", el(
+      "span",
+      {},
+      readOnly ? (st.enabled ? "on" : "off") : el(
+          "label",
+          { class: "check" },
+          el("input", {
+            type: "checkbox",
+            id: "notify-enabled",
+            checked: st.enabled,
+            onchange: async (e) => {
+              const want = e.target.checked;
+              if (want) askPermission();
+              try {
+                setNotifyState(await notifyRequest("/api/notify", { enabled: want }));
+              } catch (err) {
+                e.target.checked = !want;
+                flash(`notifications: ${err.message}`, true);
+              }
+            },
+          }),
+          st.enabled ? " on" : " off",
+        ),
+      el("div", { class: "muted" }, "email + browser when a watched service goes down"),
+    )],
+    ["watched", st.watched.length
+      ? el("span", { class: "wrap" }, st.watched.join(", "))
+      : el("span", { class: "muted" }, "none · use the bell on a service")],
+    ["email", configured(st.email, "CUTHULU_SMTP_HOST")],
+    ["healthcheck", configured(st.healthcheck, "CUTHULU_HEALTHCHECK_URL")],
+    ["browser", el(
+      "span",
+      {},
+      perm,
+      canAsk
+        ? el("button", { class: "btn", type: "button", onclick: askPermission }, "allow")
+        : null,
+    )],
+  ];
+  const result = (name, r) => {
+    if (!r) return null;
+    const cls = r.status === "sent" ? "lv-ok" : r.status === "failed" ? "err" : "muted";
+    const text = r.status === "failed" ? `failed: ${r.error}` : r.status === "off" ? "not configured" : "sent";
+    return el("div", { class: "wrap" }, `${name}: `, el("span", { class: cls }, text));
+  };
+  fill(
+    body,
+    el("dl", { class: "kv notify-kv" }, ...rows.flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v)])),
+    readOnly
+      ? el("p", { class: "muted" }, "read-only: settings cannot be changed here")
+      : el(
+          "div",
+          { class: "notify-test" },
+          el("button", { class: "btn", type: "button", id: "notify-test", onclick: sendTest }, "send test"),
+          el("span", { class: "muted" }, " email + ping + this browser"),
+        ),
+    notify.test === "busy" ? el("div", { class: "muted" }, "sending…") : null,
+    notify.test && notify.test !== "busy" ? result("email", notify.test.email) : null,
+    notify.test && notify.test !== "busy" ? result("healthcheck", notify.test.healthcheck) : null,
+    st.email ? el("p", { class: "muted wrap" }, `emails: down after 30s, back up, at most one down per service per ${st.cooldown_minutes}m`) : null,
+  );
+}
+
+async function sendTest() {
+  if (notify.test === "busy") return;
+  askPermission();
+  notify.test = "busy";
+  drawNotify();
+  try {
+    notify.test = await notifyRequest("/api/notify/test", {});
+  } catch (e) {
+    notify.test = { email: { status: "failed", error: e.message }, healthcheck: { status: "failed", error: e.message } };
+  }
+  if (!desktop("cuthulu: test notification", "desktop notifications work", "cuthulu:test")) {
+    flash("test: desktop notifications are not allowed; alerts show here instead");
+  }
+  drawNotify();
+}
+
+function initNotify() {
+  $("#notify").addEventListener("click", () => {
+    drawNotify();
+    $("#notify-dialog").showModal();
+  });
+  // Another tab may have changed the watch list.
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") loadNotify();
+  });
+  loadNotify();
+}
+
 // ── tailscale ──────────────────────────────────────────────
 
 /** Shows the topbar link to this machine in the Tailscale admin console. */
@@ -1155,6 +1479,7 @@ async function initTailscale() {
 
 $("#theme").addEventListener("click", toggleTheme);
 initBack();
+initNotify();
 initTailscale();
 document.addEventListener("keydown", (e) => {
   if (e.ctrlKey || e.metaKey || e.altKey || typing(e)) return;

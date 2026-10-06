@@ -14,12 +14,14 @@ this file in the same change when a decision moves.
                           ├── providers
                           │     └── docker ──unix socket──▶ /var/run/docker.sock
                           ├── system    : host CPU/memory/network/disk ──▶ procfs (read-only)
+                          └── notify    : alerts, heartbeat ──▶ SMTP, healthcheck URL (outbound only)
                           └── tailscale : admin console link ──unix socket──▶ tailscaled LocalAPI (GET status only)
 ```
 
 One process, one binary, no database. Docker is the source of truth; the
 registry is a cache of it kept current by events. The only state Cuthulu owns
-itself (per-service TODOs) lives in one JSON file in `CUTHULU_DATA_DIR`.
+itself (per-service TODOs, which services to alert about) lives in two small
+JSON files in `CUTHULU_DATA_DIR`.
 
 ## Stack
 
@@ -35,6 +37,8 @@ itself (per-service TODOs) lives in one JSON file in `CUTHULU_DATA_DIR`.
 | Asset embedding    | `rust-embed`                             | One binary; works offline. In debug builds files are read from disk, so CSS/JS edits need no rebuild |
 | Errors             | `thiserror` (library), `anyhow` (`main.rs` only) | |
 | Logging            | `tracing` + `tracing-subscriber`         | `RUST_LOG` filter |
+| Email              | `lettre` (tokio transport, rustls + bundled Mozilla roots) | Async SMTP; the `scratch` image has no CA store |
+| Healthcheck ping   | `ureq` (rustls) on the blocking pool     | One GET every few minutes; smaller than an async client stack |
 
 > **Decision (2026-10):** the first draft planned `htmx`. Because every
 > dynamic part of the UI is driven by SSE events that patch rows client-side,
@@ -57,12 +61,19 @@ src/
   main.rs              CLI (run | healthcheck | --version), tracing, graceful shutdown
   lib.rs
   config.rs            CUTHULU_* env parsing (pure, unit-tested via a lookup fn)
+  envfile.rs           optional ./.env reader layered under the real environment
   build_info.rs        version (Cargo.toml) + git commit injected at build time
   model.rs             Service, ServiceId, ServiceState, Action, LogLine, …
   registry.rs          in-memory state, watch loop per provider, broadcast; MockProvider for tests
   server.rs            AppState, router, security headers; HTTP-level tests
   web.rs               askama page handlers, embedded asset handler (ETag)
   todos.rs             per-service TODO store: JSON file, in-memory cache, atomic writes
+  notify/
+    mod.rs             Notifier: alert loop on the registry broadcast, email outbox, shutdown email
+    alerts.rs          pure down/up state machine: settle, cooldown, operator actions
+    mail.rs            Mailer trait, SMTP (lettre), email texts
+    heartbeat.rs       healthcheck pings (ureq)
+    store.rs           watched services + global switch: notify.json, atomic writes
   tailscale.rs         tailscaled LocalAPI status → admin console link (cached, on demand)
   api/
     mod.rs             /api router
@@ -72,6 +83,7 @@ src/
     system.rs          host snapshot + SSE stream
     guard.rs           CSRF / same-origin check for POSTs
     todos.rs           per-service TODO list / create / toggle / delete
+    notify.rs          notification settings, watch toggle, test
     tailscale.rs       link to this machine in the Tailscale admin console
     version.rs         running build (version, commit)
     error.rs           ApiError → JSON { error, code }
@@ -179,6 +191,10 @@ services.
 | POST   | `/api/services/{id}/todos`         | Add an item, body `{"text": "..."}`; returns the list |
 | POST   | `/api/services/{id}/todos/{todo_id}/toggle` | Flip done; returns the list |
 | POST   | `/api/services/{id}/todos/{todo_id}/delete` | Remove; returns the list |
+| GET    | `/api/notify`                      | `{enabled, watched, email, healthcheck, cooldown_minutes, restarted_elsewhere}`; never addresses or URLs |
+| POST   | `/api/notify`                      | Global alert switch, body `{"enabled": bool}`; returns the state |
+| POST   | `/api/services/{id}/notify`        | Watch / unwatch, body `{"watch": bool}`; returns the state |
+| POST   | `/api/notify/test`                 | Send a test email and one ping now; `{email, healthcheck}` each `{status: sent\|off\|failed, error?}` |
 | GET    | `/api/tailscale`                   | `{available, url, tailnet, host, ip}` for the topbar's Tailscale admin link; always 200 |
 | GET    | `/api/version`                     | `{"version": "0.1.0", "git_sha": "<full sha>" \| null}` |
 
@@ -323,6 +339,103 @@ Each service has a small TODO list on its detail page.
 - Writes are POST + same-origin check and refused under `CUTHULU_READ_ONLY`
   (the UI still lists items, without edit controls).
 
+## Notifications
+
+Three independent parts, all optional:
+
+| Part | When | Channel |
+|------|------|---------|
+| **Service alerts** | a *watched* service goes down, crashes and is restarted, and when it is back | email + browser |
+| **Shutdown email** | Cuthulu itself stops cleanly (SIGTERM / SIGINT) | email |
+| **Heartbeat** | every `CUTHULU_HEALTHCHECK_INTERVAL_MINUTES` | GET `CUTHULU_HEALTHCHECK_URL` (e.g. healthchecks.io) |
+
+Modelled on `auto-git-commit-tool`'s notifications (same variable names with
+a `CUTHULU_` prefix, same TLS rules, same heartbeat semantics).
+
+- **Watched services** are chosen in the UI (bell per service) and stored
+  **by name** in `<CUTHULU_DATA_DIR>/notify.json`,
+  `{version, enabled, watched: [name]}`, with the same atomic-write and
+  never-overwrite-a-corrupt-file rules as `todos.json`. At most 500 names.
+  `enabled` is the global switch for service alerts (email and browser); it
+  does not affect the heartbeat or the shutdown email. Writes are POST +
+  same-origin and refused under `CUTHULU_READ_ONLY`.
+- **Down** means: state is not running/paused, or the health check reports
+  unhealthy, or the container was removed. Cuthulu itself is never alerted
+  on (its shutdown has its own email).
+- **No polling.** One task follows the registry broadcast and keeps a small
+  per-name state machine (`notify/alerts.rs`, pure and unit-tested). It
+  sleeps until the next deadline (settle or cooldown end) or the next event.
+  A lagging subscriber resyncs from the registry snapshot.
+- **Email rules:**
+  - *Settle 30 s:* a change must last 30 s before it is mailed, so
+    `docker restart` and `docker compose up` re-creating a container stay
+    silent.
+  - *One per transition:* "down", then "back up" only after a "down" was
+    sent.
+  - *Cooldown* (`CUTHULU_NOTIFY_COOLDOWN_MINUTES`, default 15): at most one
+    "down" per service per cooldown. A crash loop sends one email, then — if
+    it is still down when the cooldown ends — one more that says how often it
+    went down in between. Short outages during the cooldown that recover are
+    not mailed.
+  - *Crashed and restarted:* a non-clean exit (any code but 0, 130, 137,
+    143), `dead` or `restarting`, followed by running again *before* the
+    settle ends — a restart policy or a systemd `Restart=` hiding the crash —
+    sends one email right away ("crashed and was restarted"), under the same
+    cooldown. The exit code is read before a `--rm` container disappears.
+  - *Operator actions are labelled:* a down flip within 60 s of a
+    stop/restart requested through Cuthulu is mailed as "stopped from
+    cuthulu" and is exempt from the cooldown (deliberate, rare, and a
+    repeated test should not go silent). A quick restart stays silent as
+    usual.
+  - *Started by something else:* a service stopped through Cuthulu that is
+    running again within 15 min without a start from Cuthulu was brought
+    back by something Cuthulu does not control — typically a systemd unit
+    running `docker run --rm` with `Restart=always`, where stopping the
+    container cannot keep it down. The "back up" email says so and suggests
+    stopping the unit; `GET /api/notify` lists such services in
+    `restarted_elsewhere` (in memory, cleared when the service goes down
+    again or Cuthulu restarts) and the UI marks them.
+  - Outages that began before Cuthulu saw the service, or while it was not
+    watched, are not reported.
+  - Sending is best effort: a bounded outbox (32), 3 attempts 10 s / 20 s
+    apart, no retry on permanent SMTP errors; failures are logged.
+- **Browser alerts** are computed client-side from `/api/events` while a
+  Cuthulu page is open: a watched service that flips from up to down and is
+  still down 10 s later raises a desktop `Notification` (tag per service, at
+  most one per service per minute), or an in-page flash when permission is
+  not granted. Permission is only requested from a click (the bell, the
+  alerts switch, "allow", "send test"). A stop/restart clicked in the same
+  tab is alerted with "stopped from the dashboard". Independently of
+  watching, a service stopped from this tab that comes back on its own
+  raises a warning flash. The Notification API needs a secure context:
+  `localhost` / `127.0.0.1` (or an SSH tunnel to them) qualify, a plain-HTTP
+  LAN address does not — then only the flash is shown.
+- **Shutdown email** after the HTTP server has stopped, within 8 s (fits
+  `docker stop`'s default 10 s grace). Lists watched services that are down.
+  A crash or `SIGKILL` sends nothing; that is what the heartbeat is for.
+- **Heartbeat:** a GET to the URL right after start and then every interval.
+  A ping is skipped while a provider is disconnected (Cuthulu that cannot
+  see Docker is not watching anything), and retried 5 s later. Nothing is
+  sent on shutdown (no `/fail` ping): as in the reference, a stopped
+  Cuthulu is reported by healthchecks.io once period + grace pass, and the
+  shutdown email says it was deliberate. A `200 OK (not found)` answer (an
+  unknown check) counts as a failure. Failures are logged once, then again
+  when pings recover.
+- **Secrets:** the SMTP password and the ping URL are wrapped in a type whose
+  `Debug` prints `[redacted]`; config errors never echo them; the API only
+  says whether each channel is configured.
+
+> **Decision (2026-10):** stops requested through Cuthulu's own buttons are
+> *labelled*, not suppressed (first shipped suppressed; changed after testing
+> showed a silent stop looks like broken notifications, and stops of
+> systemd-managed containers need the "started by something else" follow-up
+> anyway).
+>
+> **Decision (2026-10):** Cuthulu does not stop systemd units. It only talks
+> to Docker; reaching the host's system and user D-Bus from the container
+> would be a separate provider with its own security review. It detects and
+> explains the situation instead.
+
 ## Tailscale admin link
 
 A topbar button opens this machine's page in the Tailscale admin console,
@@ -363,6 +476,17 @@ allowed after a confirmation.
 
 ## Configuration
 
+Settings come from environment variables. A `.env` file in the working
+directory is read too (so `cargo run` sees the same settings as
+`docker compose`, which reads that file): Compose syntax without
+interpolation — `KEY=value`, `#` comments, optional `export`, `'literal'` or
+`"escaped"` quotes. The real environment always wins over the file, the file
+is never copied into the process environment (the crate forbids `unsafe`, and
+`set_var` is unsafe in edition 2024), and only variable *names* are logged. A
+malformed file stops startup with the line number, never the value. In the
+image the working directory is `/` and `.env` is excluded from the build
+context, so containers get their settings from Compose as before.
+
 | Variable                 | Default                        | Meaning |
 |--------------------------|--------------------------------|---------|
 | `CUTHULU_BIND`           | `127.0.0.1:8686` (image: `0.0.0.0:8686`) | Listen address |
@@ -373,7 +497,19 @@ allowed after a confirmation.
 | `CUTHULU_PROC_DIR`       | `/proc` (compose: `/host/proc`) | procfs the host panel reads; mount the host's read-only in a container |
 | `CUTHULU_SYSTEM_SECS`    | `2`                            | Host panel sampling interval (1–60), only while someone watches |
 | `CUTHULU_SYSTEM_PROCESSES` | `false`                      | Also list the top processes (by CPU / memory) in the host panel |
-| `CUTHULU_DATA_DIR`       | `./data` (image: `/data`)      | Directory for `todos.json`; created on first write |
+| `CUTHULU_DATA_DIR`       | `./data` (image: `/data`)      | Directory for `todos.json` and `notify.json`; created on first write |
+| `CUTHULU_NOTIFY_ENABLED` | `true`                         | Master switch for email and healthcheck pings (`false` keeps the settings but sends nothing) |
+| `CUTHULU_SMTP_HOST`      | —                              | SMTP server; unset = no email |
+| `CUTHULU_SMTP_PORT`      | `465`                          | `465` = implicit TLS, any other port = STARTTLS |
+| `CUTHULU_SMTP_TLS`       | from the port                  | `implicit` \| `starttls` \| `none` (`none` only for a server on localhost) |
+| `CUTHULU_SMTP_USERNAME`  | —                              | SMTP login (with `CUTHULU_SMTP_PASSWORD`) |
+| `CUTHULU_SMTP_PASSWORD`  | —                              | SMTP password / app password; never logged or shown |
+| `CUTHULU_NOTIFY_EMAIL_FROM` | the username                | Sender; display name `cuthulu` when it has none |
+| `CUTHULU_NOTIFY_EMAIL_TO` | the sender                    | Recipient |
+| `CUTHULU_NOTIFY_COOLDOWN_MINUTES` | `15`                  | Least time between two "down" emails for one service (1–1440) |
+| `CUTHULU_NOTIFY_HOST`    | host name (outside a container), else `cuthulu` | Machine name in email subjects |
+| `CUTHULU_HEALTHCHECK_URL` | —                             | Ping URL, e.g. `https://hc-ping.com/<uuid>`; secret |
+| `CUTHULU_HEALTHCHECK_INTERVAL_MINUTES` | `5`              | Ping interval (1–1440) |
 | `CUTHULU_TAILSCALE_SOCKET` | `/var/run/tailscale/tailscaled.sock` | tailscaled LocalAPI socket for the topbar's admin console link; set empty to disable |
 | `CUTHULU_TAILSCALE_URL`  | unset                          | Explicit http(s) URL for the Tailscale button; shown even without the socket |
 | `RUST_LOG`               | `info`                         | Tracing filter |
@@ -401,6 +537,9 @@ to the host**. Therefore:
 - `CUTHULU_READ_ONLY=true` for a pure viewer.
 - TODO text is user input: rendered with `textContent` only, length-bounded.
 - Env var values never leave the Docker provider.
+- Notification secrets (SMTP password, ping URL) are never logged, echoed in
+  config errors or returned by the API. Unencrypted SMTP is refused unless
+  the server is on localhost.
 - The image runs as a non-root user (65532) from `scratch`.
 - The host's `/proc` (and optionally `/etc/passwd`) are mounted read-only;
   the panel shows process command lines but never environments.

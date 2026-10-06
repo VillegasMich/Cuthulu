@@ -77,6 +77,11 @@ pub async fn act(
             "cuthulu is running in read-only mode".to_owned(),
         ));
     }
+    if let Some(service) = st.registry.get(&id) {
+        // Lets alerts say a stop came from here, and spot a service that
+        // something else (a systemd unit) starts again.
+        st.notifier.expect(&service.name, action == Action::Stop);
+    }
     Ok(Json(st.registry.act(&id, action).await?))
 }
 

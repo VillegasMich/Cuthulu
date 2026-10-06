@@ -4,6 +4,7 @@ mod error;
 mod events;
 mod guard;
 mod logs;
+mod notify;
 mod services;
 mod system;
 mod tailscale;
@@ -28,6 +29,9 @@ pub fn router() -> Router<AppState> {
         .route("/services/{id}/todos", get(todos::list).post(todos::create))
         .route("/services/{id}/todos/{todo_id}/toggle", post(todos::toggle))
         .route("/services/{id}/todos/{todo_id}/delete", post(todos::delete))
+        .route("/services/{id}/notify", post(notify::set_watch))
+        .route("/notify", get(notify::state).post(notify::set_enabled))
+        .route("/notify/test", post(notify::test))
         .route("/events", get(events::stream))
         .route("/system", get(system::snapshot))
         .route("/system/stream", get(system::stream))

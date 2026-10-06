@@ -10,6 +10,7 @@ use axum::routing::get;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::Config;
+use crate::notify::Notifier;
 use crate::registry::Registry;
 use crate::system::SystemMonitor;
 use crate::tailscale::Tailscale;
@@ -26,6 +27,8 @@ pub struct AppState {
     pub system: Arc<SystemMonitor>,
     /// Per-service TODO items (`CUTHULU_DATA_DIR/todos.json`).
     pub todos: Arc<TodoStore>,
+    /// Watched services, alerts, heartbeat (`CUTHULU_DATA_DIR/notify.json`).
+    pub notifier: Arc<Notifier>,
     /// Link to this machine in the Tailscale admin console.
     pub tailscale: Arc<Tailscale>,
 }
@@ -103,6 +106,10 @@ mod tests {
             todos: Arc::new(TodoStore::open(std::path::Path::new(
                 "/nonexistent/cuthulu",
             ))),
+            notifier: Notifier::new(&Config {
+                data_dir: "/nonexistent/cuthulu".into(),
+                ..Config::default()
+            }),
             tailscale: Arc::new(crate::tailscale::tests::disabled()),
         });
         (app, registry)
@@ -325,6 +332,10 @@ mod tests {
             todos: Arc::new(TodoStore::open(std::path::Path::new(
                 "/nonexistent/cuthulu",
             ))),
+            notifier: Notifier::new(&Config {
+                data_dir: "/nonexistent/cuthulu".into(),
+                ..Config::default()
+            }),
             tailscale: Arc::new(crate::tailscale::tests::disabled()),
         });
         (app, system)
@@ -340,6 +351,10 @@ mod tests {
             todos: Arc::new(TodoStore::open(std::path::Path::new(
                 "/nonexistent/cuthulu",
             ))),
+            notifier: Notifier::new(&Config {
+                data_dir: "/nonexistent/cuthulu".into(),
+                ..Config::default()
+            }),
             tailscale: Arc::new(tailscale),
         })
     }
