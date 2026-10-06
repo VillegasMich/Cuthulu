@@ -245,6 +245,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dashboard_has_host_panel_splitter() {
+        let (app, _) = app_with(vec![web()], false).await;
+        let (_, _, index) = send(&app, get("/")).await;
+        assert!(index.contains(r#"id="split-sys""#));
+        assert!(index.contains(r#"role="separator" aria-orientation="horizontal""#));
+        // Column splitters are added by app.js to these headers.
+        for col in ["c-state", "c-name", "c-group", "c-image", "c-ports", "c-up"] {
+            assert!(index.contains(&format!(r#"<th class="{col}"#)), "{col}");
+        }
+    }
+
+    #[tokio::test]
     async fn serves_assets_with_etag() {
         let (app, _) = app_with(vec![], false).await;
         let (status, headers, _) = send(&app, get("/static/app.css")).await;
