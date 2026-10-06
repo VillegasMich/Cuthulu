@@ -79,17 +79,18 @@ stores an explicit choice in `localStorage` and sets `data-theme` on `<html>`.
 
 An htop-style block at the top of the dashboard, inside one bordered
 `--surface` box. Collapsible (header button, `m`); the state is remembered
-in `localStorage` (`cuthulu.sys.open`), as is the sort (`cuthulu.sys.mem`).
+in `localStorage` (`cuthulu.sys.open`), as is the process sort
+(`cuthulu.sys.mem`).
 
 ```
 ▾ host  my-box
-    0 [||||||      31.0%]    1 [||||        22.0%]   pid  user   cpu%▾ mem%  res  command
-    2 [||          9.5%]     3 [|||||||     40.1%]  1234  root    48.2  3.1  312M /usr/bin/…
-  Mem [||||||||||||||||||           5.8G/15.5G]
-  Swp [|                             0.1G/2.0G]
-  Load 1.12 0.98 0.80
-  Tasks 312, 1708 threads; 2 running
-  Up    3d 4h
+    0 [||||||      31.0%]    1 [||||        22.0%]   Load  1.12 0.98 0.80
+    2 [||           9.5%]    3 [|||||||     40.1%]   Tasks 312, 1708 threads; 2 running
+  Mem [||||||||||||||||||           5.8G/15.5G]      Up    3d 4h
+  Swp [|                             0.1G/2.0G]      Net   wlp2s0  ↓ 526K/s  ↑  34K/s
+                                                     IP    192.168.1.57
+                                                           tailscale0 fd7a::1   (muted)
+                                                     Disk  read 106K/s  write 819K/s
 ```
 
 - **Meters are text**: `[`, pipes, spaces, the value written over the right
@@ -102,10 +103,16 @@ in `localStorage` (`cuthulu.sys.open`), as is the sort (`cuthulu.sys.mem`).
   Labels and brackets are `--muted`.
 - CPU meters use enough columns to stay about four rows tall (2 columns for
   ≤ 8 cores, up to 8); Mem/Swp span the CPU block's width. Below 600px one
-  column, and the process table drops user and res.
-- Process table: top 10, sortable by `cpu%` or `mem%` (header buttons, the
-  active one marked `▾` and `aria-sort`). Command in `--muted`, ellipsized,
-  full text in the tooltip. CPU% is per core (can exceed 100).
+  column.
+- Info column: a label / value list (`dt` in `--muted`). Rates are padded
+  to a fixed width so the line does not jitter; the network tooltip gives
+  Mbit/s. The primary interface's addresses come first, other addresses
+  (VPNs, second NICs) follow in `--muted`. `↓` / `↑` are plain text glyphs.
+- Process table (only with `CUTHULU_SYSTEM_PROCESSES=true`): top 10,
+  sortable by `cpu%` or `mem%` (header buttons, the active one marked `▾`
+  and `aria-sort`). Command in `--muted`, ellipsized, full text in the
+  tooltip. CPU% is per core (can exceed 100). Below 600px it drops user and
+  res.
 - No new color tokens.
 
 ## Keyboard shortcuts

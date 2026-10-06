@@ -25,6 +25,8 @@ pub struct Config {
     pub proc_dir: PathBuf,
     /// Host panel sampling interval while someone is watching.
     pub system_interval: Duration,
+    /// Also list the busiest processes in the host panel.
+    pub system_processes: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -45,6 +47,7 @@ impl Default for Config {
             reconcile_interval: Duration::from_secs(60),
             proc_dir: PathBuf::from("/proc"),
             system_interval: Duration::from_secs(2),
+            system_processes: false,
         }
     }
 }
@@ -116,6 +119,12 @@ impl Config {
                     )),
                     Err(e) => Err(e.to_string()),
                 },
+            )?,
+            system_processes: parse(
+                get("CUTHULU_SYSTEM_PROCESSES"),
+                "CUTHULU_SYSTEM_PROCESSES",
+                d.system_processes,
+                parse_bool,
             )?,
         })
     }
@@ -199,8 +208,11 @@ mod tests {
         let c = from(&[
             ("CUTHULU_PROC_DIR", "/host/proc"),
             ("CUTHULU_SYSTEM_SECS", "5"),
+            ("CUTHULU_SYSTEM_PROCESSES", "true"),
         ])
         .unwrap();
+        assert!(c.system_processes);
+        assert!(!Config::default().system_processes, "off by default");
         assert_eq!(c.proc_dir, PathBuf::from("/host/proc"));
         assert_eq!(c.system_interval, Duration::from_secs(5));
         assert!(from(&[("CUTHULU_SYSTEM_SECS", "0")]).is_err());

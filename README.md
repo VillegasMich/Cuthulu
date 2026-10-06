@@ -16,8 +16,9 @@ start/stop/restart work. See the [roadmap](docs/ROADMAP.md).
 - Live state updates (event-driven, no polling)
 - Live log tailing with search and stderr highlighting
 - Start / stop / restart, with protection against stopping itself
-- htop-style host panel: per-core CPU, memory, swap, load and top processes,
-  read straight from `/proc` (sampled only while someone is watching)
+- htop-style host panel: per-core CPU, memory, swap, load, IP addresses,
+  network and disk throughput (optionally top processes), read straight from
+  `/proc` and sampled only while someone is watching
 - Light and dark themes, keyboard driven, dense terminal-style UI
 - Scales from a handful to hundreds of services (event-driven, no polling)
 - Single static binary in a `scratch` image

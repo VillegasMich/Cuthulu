@@ -1,4 +1,5 @@
-//! Host system stats (CPU, memory, load, top processes) read from `/proc`.
+//! Host system stats read from `/proc`: CPU, memory, load, network,
+//! disk I/O and (opt-in) the busiest processes.
 //!
 //! This is not a [`Provider`](crate::providers::Provider): the host is not a
 //! service source. One shared sampler runs only while at least one client is
@@ -9,6 +10,7 @@
 pub mod proc;
 
 use std::collections::HashMap;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -18,18 +20,25 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-use self::proc::{LoadAvg, MemInfo, PidStat, PidStatus, Stat, ratio};
+use self::proc::{LoadAvg, MemInfo, PidStat, PidStatus, Route, Stat, ratio};
+use crate::config::Config;
 
 /// Processes listed per sort key. The snapshot carries the union of the top
 /// `TOP` by CPU and by memory, so the client can sort by either.
 pub const TOP: usize = 10;
 /// Longest command line sent per process, in bytes.
 const MAX_CMD: usize = 512;
+/// Addresses sent per list (primary interface / others).
+const MAX_ADDRS: usize = 8;
 /// Snapshots buffered per subscriber; older ones are skipped, never queued.
 const CAPACITY: usize = 4;
-/// Gap between the two reads of a one-off sample (CPU% needs a delta).
+/// Gap between the two reads of a one-off sample (rates need a delta).
 const BASELINE: Duration = Duration::from_millis(250);
 const PASSWD: &str = "/etc/passwd";
+/// Interfaces that are container or VM plumbing, not the host's own links.
+const VIRTUAL_IFACES: [&str; 9] = [
+    "lo", "docker", "br-", "veth", "virbr", "cni", "flannel", "cali", "vxlan",
+];
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum SystemError {
@@ -61,10 +70,14 @@ pub struct Snapshot {
     /// Runnable threads (from `/proc/loadavg`).
     pub running: u32,
     pub uptime_secs: u64,
-    /// How many processes the client should list.
-    pub top: usize,
-    /// Highest CPU first.
-    pub procs: Vec<Process>,
+    /// `None` when the network files cannot be read.
+    pub net: Option<Net>,
+    /// `None` when `/proc/diskstats` cannot be read.
+    pub disk: Option<DiskIo>,
+    /// Only with `CUTHULU_SYSTEM_PROCESSES`: the union of the top
+    /// [`TOP`] by CPU and by memory, highest CPU first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub procs: Option<Vec<Process>>,
 }
 
 /// Bytes.
@@ -72,6 +85,28 @@ pub struct Snapshot {
 pub struct Usage {
     pub total: u64,
     pub used: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Net {
+    /// Interface of the default route.
+    pub iface: Option<String>,
+    /// Addresses on `iface`: IPv4, then global IPv6.
+    pub addrs: Vec<String>,
+    /// The host's other addresses (VPNs, second NICs), as `iface addr` when
+    /// the interface is known. Container bridges are left out.
+    pub other: Vec<String>,
+    /// Bytes per second received / sent on `iface`, or summed over the
+    /// non-virtual interfaces when there is no default route.
+    pub rx: u64,
+    pub tx: u64,
+}
+
+/// Bytes per second read from / written to the physical disks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct DiskIo {
+    pub read: u64,
+    pub write: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -97,12 +132,18 @@ struct ProcRaw {
     status: PidStatus,
 }
 
-/// Everything one CPU% delta needs, from one point in time.
+/// Every counter a delta needs, from one point in time.
 #[derive(Debug, Clone)]
 struct Raw {
     at: Instant,
     stat: Stat,
+    tasks: u32,
+    /// Empty unless processes are enabled.
     procs: HashMap<u32, ProcRaw>,
+    /// Interface → (rx, tx) bytes.
+    net: Option<HashMap<String, (u64, u64)>>,
+    /// (read, written) bytes.
+    disk: Option<(u64, u64)>,
 }
 
 #[derive(Default)]
@@ -114,28 +155,35 @@ struct State {
 pub struct SystemMonitor {
     proc_dir: PathBuf,
     interval: Duration,
+    processes: bool,
     users: HashMap<u32, String>,
     /// `sys/kernel/hostname` answers for the *reader's* UTS namespace, so
     /// inside a container it is the container's name, not the host's.
     read_hostname: bool,
     tx: broadcast::Sender<Update>,
     state: Mutex<State>,
-    /// Previous raw read, the baseline for the next CPU% delta.
+    /// Previous raw read, the baseline for the next delta.
     prev: Mutex<Option<Raw>>,
     shutdown: CancellationToken,
 }
 
 impl SystemMonitor {
     #[must_use]
-    pub fn new(proc_dir: PathBuf, interval: Duration, shutdown: CancellationToken) -> Arc<Self> {
+    pub fn new(config: &Config, shutdown: CancellationToken) -> Arc<Self> {
+        let processes = config.system_processes;
         // Optional: in the container the host's file is mounted read-only;
         // without it users are shown by uid.
-        let users = std::fs::read_to_string(PASSWD)
-            .map(|s| proc::parse_passwd(&s))
-            .unwrap_or_default();
+        let users = if processes {
+            std::fs::read_to_string(PASSWD)
+                .map(|s| proc::parse_passwd(&s))
+                .unwrap_or_default()
+        } else {
+            HashMap::new()
+        };
         Arc::new(Self {
-            proc_dir,
-            interval,
+            proc_dir: config.proc_dir.clone(),
+            interval: config.system_interval,
+            processes,
             users,
             read_hostname: !Path::new("/.dockerenv").exists(),
             tx: broadcast::channel(CAPACITY).0,
@@ -245,12 +293,16 @@ impl SystemMonitor {
             mem,
             load,
             uptime,
+            addrs: self.addresses(),
         };
-        let snap = build(&base, &now, host, &self.users, |pid| {
-            std::fs::read(self.proc_dir.join(pid.to_string()).join("cmdline"))
-                .map(|raw| proc::parse_cmdline(&raw, MAX_CMD))
-                .unwrap_or_default()
-        });
+        let mut snap = build(&base, &now, host);
+        if self.processes {
+            snap.procs = Some(top_processes(&base, &now, mem.total, &self.users, |pid| {
+                std::fs::read(self.proc_dir.join(pid.to_string()).join("cmdline"))
+                    .map(|raw| proc::parse_cmdline(&raw, MAX_CMD))
+                    .unwrap_or_default()
+            }));
+        }
         *prev = Some(now);
         Ok(snap)
     }
@@ -260,10 +312,33 @@ impl SystemMonitor {
         std::fs::read_to_string(&path).map_err(|e| io_err(&path, &e))
     }
 
+    /// A file under `net/`. `<proc>/net` is a link to `self/net`: the
+    /// *reader's* network namespace, which in a container is the
+    /// container's. Pid 1's view is the host's, so prefer that.
+    fn read_net(&self, file: &str) -> Option<String> {
+        self.read(&format!("1/net/{file}"))
+            .or_else(|_| self.read(&format!("net/{file}")))
+            .ok()
+    }
+
+    fn addresses(&self) -> Option<Addrs> {
+        let routes = proc::parse_route(&self.read_net("route")?).ok()?;
+        let v4 = self
+            .read_net("fib_trie")
+            .map(|s| proc::parse_fib_trie_local(&s))
+            .unwrap_or_default();
+        let v6 = self
+            .read_net("if_inet6")
+            .map(|s| proc::parse_if_inet6(&s))
+            .unwrap_or_default();
+        Some(addresses(&routes, &v4, &v6))
+    }
+
     fn read_raw(&self) -> Result<Raw, SystemError> {
         let at = Instant::now();
         let stat = proc::parse_stat(&self.read("stat")?)?;
         let dir = std::fs::read_dir(&self.proc_dir).map_err(|e| io_err(&self.proc_dir, &e))?;
+        let mut tasks = 0u32;
         let mut procs = HashMap::new();
         for entry in dir.flatten() {
             let Some(pid) = entry
@@ -273,13 +348,26 @@ impl SystemMonitor {
             else {
                 continue;
             };
+            tasks += 1;
             // Processes vanish between listing and reading, and `hidepid`
             // hides other users' ones: skip anything unreadable.
-            if let Some(p) = read_proc(&entry.path()) {
+            if self.processes
+                && let Some(p) = read_proc(&entry.path())
+            {
                 procs.insert(pid, p);
             }
         }
-        Ok(Raw { at, stat, procs })
+        Ok(Raw {
+            at,
+            stat,
+            tasks,
+            procs,
+            net: self.read_net("dev").map(|s| proc::parse_net_dev(&s)),
+            disk: self
+                .read("diskstats")
+                .ok()
+                .map(|s| proc::parse_diskstats(&s)),
+        })
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
@@ -303,23 +391,92 @@ fn io_err(path: &Path, e: &std::io::Error) -> SystemError {
     }
 }
 
+fn is_virtual(iface: &str) -> bool {
+    VIRTUAL_IFACES.iter().any(|p| iface.starts_with(p))
+}
+
+/// The host's addresses, grouped by the interface of the default route.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Addrs {
+    iface: Option<String>,
+    primary: Vec<String>,
+    other: Vec<String>,
+}
+
+fn addresses(routes: &[Route], v4: &[Ipv4Addr], v6: &[(String, Ipv6Addr)]) -> Addrs {
+    let iface = routes
+        .iter()
+        .filter(|r| r.is_default())
+        .min_by_key(|r| r.metric)
+        .map(|r| r.iface.clone());
+    let mut out = Addrs {
+        iface,
+        ..Addrs::default()
+    };
+    let mut place = |on: Option<&str>, ip: String| {
+        let list = match on {
+            Some(i) if is_virtual(i) => return,
+            Some(i) if Some(i) == out.iface.as_deref() => &mut out.primary,
+            Some(i) => {
+                if out.other.len() < MAX_ADDRS {
+                    out.other.push(format!("{i} {ip}"));
+                }
+                return;
+            }
+            // No main-table route (e.g. a VPN using its own table).
+            None => &mut out.other,
+        };
+        if list.len() < MAX_ADDRS {
+            list.push(ip);
+        }
+    };
+    for ip in v4.iter().filter(|ip| !ip.is_loopback()) {
+        // Longest matching prefix; masks are contiguous, so bigger is longer.
+        let on = routes
+            .iter()
+            .filter(|r| !r.is_default() && r.contains(*ip))
+            .max_by_key(|r| u32::from(r.mask))
+            .map(|r| r.iface.as_str());
+        place(on, ip.to_string());
+    }
+    for (i, ip) in v6 {
+        place(Some(i), ip.to_string());
+    }
+    out
+}
+
 /// Host-wide values that need no delta.
 struct Host {
     hostname: Option<String>,
     mem: MemInfo,
     load: LoadAvg,
     uptime: u64,
+    addrs: Option<Addrs>,
 }
 
-/// Turns two raw reads into a snapshot. Pure apart from `cmdline`, which
-/// is only called for the processes that make the top lists.
-fn build(
-    prev: &Raw,
-    now: &Raw,
-    host: Host,
-    users: &HashMap<u32, String>,
-    cmdline: impl Fn(u32) -> String,
-) -> Snapshot {
+/// Bytes per second between two counter readings.
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+fn rate(before: u64, after: u64, secs: f64) -> u64 {
+    if secs <= 0.0 {
+        return 0;
+    }
+    (after.saturating_sub(before) as f64 / secs).round() as u64
+}
+
+/// (rx, tx) of `iface`, or summed over the non-virtual interfaces.
+fn traffic(counters: &HashMap<String, (u64, u64)>, iface: Option<&str>) -> (u64, u64) {
+    counters
+        .iter()
+        .filter(|(name, _)| iface.map_or(!is_virtual(name), |i| i == name.as_str()))
+        .fold((0, 0), |(r, t), (_, (dr, dt))| (r + dr, t + dt))
+}
+
+/// Turns two raw reads into a snapshot (without processes).
+fn build(prev: &Raw, now: &Raw, host: Host) -> Snapshot {
     let cpus = now
         .stat
         .cores
@@ -335,6 +492,60 @@ fn build(
         })
         .collect();
 
+    let secs = now.at.saturating_duration_since(prev.at).as_secs_f64();
+    let net = now.net.as_ref().map(|counters| {
+        let addrs = host.addrs.unwrap_or_default();
+        let iface = addrs.iface.as_deref();
+        let after = traffic(counters, iface);
+        let before = prev.net.as_ref().map_or(after, |c| traffic(c, iface));
+        Net {
+            rx: rate(before.0, after.0, secs),
+            tx: rate(before.1, after.1, secs),
+            iface: addrs.iface,
+            addrs: addrs.primary,
+            other: addrs.other,
+        }
+    });
+    let disk = now.disk.map(|after| {
+        let before = prev.disk.unwrap_or(after);
+        DiskIo {
+            read: rate(before.0, after.0, secs),
+            write: rate(before.1, after.1, secs),
+        }
+    });
+
+    Snapshot {
+        hostname: host.hostname,
+        cpu: round1(now.stat.all.percent_since(prev.stat.all)),
+        cpus,
+        mem: Usage {
+            total: host.mem.total,
+            used: host.mem.used,
+        },
+        swap: Usage {
+            total: host.mem.swap_total,
+            used: host.mem.swap_used,
+        },
+        load: [host.load.one, host.load.five, host.load.fifteen],
+        tasks: now.tasks,
+        threads: host.load.threads,
+        running: host.load.running,
+        uptime_secs: host.uptime,
+        net,
+        disk,
+        procs: None,
+    }
+}
+
+/// The busiest processes between two reads. Pure apart from `cmdline`,
+/// which is only called for the processes that make the top lists.
+fn top_processes(
+    prev: &Raw,
+    now: &Raw,
+    mem_total: u64,
+    users: &HashMap<u32, String>,
+    cmdline: impl Fn(u32) -> String,
+) -> Vec<Process> {
     // A process's CPU% is relative to one core, like htop: its ticks over
     // the wall-clock ticks elapsed, which is the aggregate delta per core.
     let cores = now.stat.cores.len().max(1) as u64;
@@ -376,8 +587,7 @@ fn build(
         }
     }
 
-    let procs = top
-        .into_iter()
+    top.into_iter()
         .map(|i| {
             let (pid, p, cpu) = all[i];
             let cmd = cmdline(pid);
@@ -386,7 +596,7 @@ fn build(
                 uid: p.status.uid,
                 user: users.get(&p.status.uid).cloned(),
                 cpu: round1(cpu),
-                mem: round1(ratio(p.status.rss, host.mem.total) * 100.0),
+                mem: round1(ratio(p.status.rss, mem_total) * 100.0),
                 rss: p.status.rss,
                 cmd: if cmd.is_empty() {
                     format!("[{}]", p.stat.comm)
@@ -395,28 +605,7 @@ fn build(
                 },
             }
         })
-        .collect();
-
-    Snapshot {
-        hostname: host.hostname,
-        cpu: round1(now.stat.all.percent_since(prev.stat.all)),
-        cpus,
-        mem: Usage {
-            total: host.mem.total,
-            used: host.mem.used,
-        },
-        swap: Usage {
-            total: host.mem.swap_total,
-            used: host.mem.swap_used,
-        },
-        load: [host.load.one, host.load.five, host.load.fifteen],
-        tasks: u32::try_from(now.procs.len()).unwrap_or(u32::MAX),
-        threads: host.load.threads,
-        running: host.load.running,
-        uptime_secs: host.uptime,
-        top: TOP,
-        procs,
-    }
+        .collect()
 }
 
 fn round1(v: f64) -> f64 {
@@ -453,7 +642,50 @@ pub(crate) mod tests {
             fake.cpu(0, 0);
             fake.pid(1, "init", 0, 100, b"/sbin/init\0");
             fake.pid(2, "kthreadd", 0, 0, b"");
+            fake.write(
+                "1/net/route",
+                "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\n\
+                 eth0\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\n\
+                 eth0\t0001A8C0\t00000000\t0001\t0\t0\t100\t00FFFFFF\n\
+                 docker0\t000011AC\t00000000\t0001\t0\t0\t0\t0000FFFF\n",
+            );
+            fake.write(
+                "1/net/fib_trie",
+                "Local:\n  +-- 0.0.0.0/0 3 0 5\n\
+                 |-- 127.0.0.1\n /32 host LOCAL\n\
+                 |-- 172.17.0.1\n /32 host LOCAL\n\
+                 |-- 192.168.1.57\n /32 host LOCAL\n\
+                 |-- 100.64.0.5\n /32 host LOCAL\n",
+            );
+            fake.write(
+                "1/net/if_inet6",
+                "2a0102030405060700000000000000aa 02 40 00 80 eth0\n",
+            );
+            // What a container's own namespace would show: must be ignored.
+            fake.write("net/dev", "h\nh\n  eth0: 9 0 0 0 0 0 0 0 9 0 0 0 0 0 0 0\n");
+            fake.net(0, 0);
+            fake.disk(0, 0);
             fake
+        }
+
+        /// Host-namespace counters: eth0 plus a docker bridge.
+        pub(crate) fn net(&self, rx: u64, tx: u64) {
+            self.write(
+                "1/net/dev",
+                format!(
+                    "h\nh\n    lo: 5 0 0 0 0 0 0 0 5 0 0 0 0 0 0 0\n  eth0: {rx} 0 0 0 0 0 0 0 {tx} 0 0 0 0 0 0 0\ndocker0: 7 0 0 0 0 0 0 0 7 0 0 0 0 0 0 0\n"
+                ),
+            );
+        }
+
+        /// Sectors read / written on one disk (plus a partition of it).
+        pub(crate) fn disk(&self, read: u64, written: u64) {
+            self.write(
+                "diskstats",
+                format!(
+                    "   8       0 sda 1 0 {read} 0 1 0 {written} 0 0 0 0\n   8       1 sda1 1 0 {read} 0 1 0 {written} 0 0 0 0\n"
+                ),
+            );
         }
 
         pub(crate) fn write(&self, rel: &str, content: impl AsRef<[u8]>) {
@@ -487,6 +719,22 @@ pub(crate) mod tests {
         }
     }
 
+    /// A monitor over `dir`, sampling every `ms` milliseconds.
+    pub(crate) fn monitor(
+        dir: &Path,
+        ms: u64,
+        processes: bool,
+        shutdown: CancellationToken,
+    ) -> Arc<SystemMonitor> {
+        let config = Config {
+            proc_dir: dir.to_owned(),
+            system_interval: Duration::from_millis(ms),
+            system_processes: processes,
+            ..Config::default()
+        };
+        SystemMonitor::new(&config, shutdown)
+    }
+
     impl Drop for FakeProc {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
@@ -500,6 +748,9 @@ pub(crate) mod tests {
                 all,
                 cores: vec![(0, all), (1, all)],
             },
+            tasks: u32::try_from(procs.len()).unwrap(),
+            net: None,
+            disk: None,
             procs: procs
                 .iter()
                 .map(|&(pid, ticks, rss)| {
@@ -529,6 +780,7 @@ pub(crate) mod tests {
             },
             load: LoadAvg::default(),
             uptime: 0,
+            addrs: None,
         }
     }
 
@@ -544,23 +796,25 @@ pub(crate) mod tests {
             &[(1, 100, 10), (2, 50, 900), (3, 999, 1)],
         );
         let users = HashMap::from([(1000, "me".to_owned())]);
-        let s = build(&prev, &now, host(), &users, |pid| format!("cmd{pid}"));
-
+        let s = build(&prev, &now, host());
         assert!((s.cpu - 75.0).abs() < 1e-9);
         assert_eq!(s.cpus, [75.0, 75.0]);
         assert_eq!(s.tasks, 3);
-        let p1 = s.procs.iter().find(|p| p.pid == 1).unwrap();
+        assert_eq!(s.procs, None);
+
+        let procs = top_processes(&prev, &now, 1000, &users, |pid| format!("cmd{pid}"));
+        let p1 = procs.iter().find(|p| p.pid == 1).unwrap();
         assert!((p1.cpu - 100.0).abs() < 1e-9, "a full core");
         assert_eq!(p1.user.as_deref(), Some("me"));
-        let p2 = s.procs.iter().find(|p| p.pid == 2).unwrap();
+        let p2 = procs.iter().find(|p| p.pid == 2).unwrap();
         assert!((p2.cpu - 50.0).abs() < 1e-9);
         assert!((p2.mem - 90.0).abs() < 1e-9);
-        let p3 = s.procs.iter().find(|p| p.pid == 3).unwrap();
+        let p3 = procs.iter().find(|p| p.pid == 3).unwrap();
         assert!(
             p3.cpu.abs() < f64::EPSILON,
             "new process has no baseline yet"
         );
-        assert_eq!(s.procs[0].pid, 1, "highest CPU first");
+        assert_eq!(procs[0].pid, 1, "highest CPU first");
     }
 
     #[test]
@@ -574,13 +828,13 @@ pub(crate) mod tests {
             &[(1, 40, 1)],
         );
         now.procs.get_mut(&1).unwrap().stat.start = 2;
-        let s = build(&prev, &now, host(), &HashMap::new(), |_| String::new());
-        assert!(s.procs[0].cpu.abs() < f64::EPSILON);
+        let procs = top_processes(&prev, &now, 1000, &HashMap::new(), |_| String::new());
+        assert!(procs[0].cpu.abs() < f64::EPSILON);
         assert_eq!(
-            s.procs[0].cmd, "[p1]",
+            procs[0].cmd, "[p1]",
             "kernel-thread style name without cmdline"
         );
-        assert_eq!(s.procs[0].user, None);
+        assert_eq!(procs[0].user, None);
     }
 
     #[test]
@@ -599,27 +853,101 @@ pub(crate) mod tests {
             },
             &procs,
         );
-        let s = build(&prev, &now, host(), &HashMap::new(), |_| "x".to_owned());
-        assert_eq!(s.procs.len(), 2 * TOP);
-        assert_eq!(s.procs[0].pid, 15);
+        let procs = top_processes(&prev, &now, 1000, &HashMap::new(), |_| "x".to_owned());
+        assert_eq!(procs.len(), 2 * TOP);
+        assert_eq!(procs[0].pid, 15);
         assert!(
-            s.procs.iter().any(|p| p.pid == 114),
+            procs.iter().any(|p| p.pid == 114),
             "biggest by memory included"
         );
         assert!(
-            !s.procs.iter().any(|p| p.pid == 1),
+            !procs.iter().any(|p| p.pid == 1),
             "neither busy nor big enough"
+        );
+    }
+
+    #[test]
+    fn network_and_disk_rates_over_elapsed_time() {
+        let mut prev = raw(CpuTimes::default(), &[]);
+        let mut now = raw(CpuTimes::default(), &[]);
+        prev.at = now.at.checked_sub(Duration::from_secs(2)).unwrap();
+        let counters = |eth: u64, veth: u64| {
+            Some(HashMap::from([
+                ("eth0".to_owned(), (eth, eth / 2)),
+                ("veth1".to_owned(), (veth, veth)),
+            ]))
+        };
+        prev.net = counters(1000, 0);
+        now.net = counters(5000, 1_000_000);
+        prev.disk = Some((0, 0));
+        now.disk = Some((4096, 1024));
+
+        let mut h = host();
+        h.addrs = Some(Addrs {
+            iface: Some("eth0".to_owned()),
+            ..Addrs::default()
+        });
+        let s = build(&prev, &now, h);
+        let net = s.net.unwrap();
+        assert_eq!((net.rx, net.tx), (2000, 1000), "eth0 only, per second");
+        assert_eq!(
+            s.disk,
+            Some(DiskIo {
+                read: 2048,
+                write: 512
+            })
+        );
+
+        // No default route: every non-virtual interface counts, veth does not.
+        let s = build(&prev, &now, host());
+        assert_eq!(s.net.unwrap().rx, 2000);
+        // First sample: no baseline, so no made-up rate.
+        prev.net = None;
+        prev.disk = None;
+        let s = build(&prev, &now, host());
+        assert_eq!((s.net.unwrap().rx, s.disk.unwrap().read), (0, 0));
+    }
+
+    #[test]
+    fn addresses_grouped_by_default_route() {
+        let routes = proc::parse_route(
+            "h\n\
+             wlan0\t00000000\t0101A8C0\t3\t0\t0\t600\t00000000\n\
+             eth9\t00000000\t0101A8C0\t3\t0\t0\t100\t00000000\n\
+             eth9\t0001A8C0\t00000000\t1\t0\t0\t100\t00FFFFFF\n\
+             wlan0\t0000000A\t00000000\t1\t0\t0\t600\t000000FF\n\
+             br-1\t000012AC\t00000000\t1\t0\t0\t0\t0000FFFF\n",
+        )
+        .unwrap();
+        let v4: Vec<Ipv4Addr> = [
+            "127.0.0.1",
+            "192.168.1.57",
+            "10.0.0.8",
+            "172.18.0.1",
+            "100.64.0.5",
+        ]
+        .iter()
+        .map(|a| a.parse().unwrap())
+        .collect();
+        let v6 = vec![("eth9".to_owned(), "2a01::aa".parse().unwrap())];
+        let a = addresses(&routes, &v4, &v6);
+        assert_eq!(
+            a.iface.as_deref(),
+            Some("eth9"),
+            "lowest metric default route"
+        );
+        assert_eq!(a.primary, ["192.168.1.57", "2a01::aa"]);
+        assert_eq!(
+            a.other,
+            ["wlan0 10.0.0.8", "100.64.0.5"],
+            "bridges and loopback left out"
         );
     }
 
     #[tokio::test]
     async fn one_off_snapshot_from_a_fake_proc_dir() {
         let fake = FakeProc::new();
-        let mon = SystemMonitor::new(
-            fake.0.clone(),
-            Duration::from_millis(50),
-            CancellationToken::new(),
-        );
+        let mon = monitor(&fake.0, 50, true, CancellationToken::new());
         let s = mon.snapshot().await.unwrap();
         assert_eq!(s.hostname.as_deref(), Some("box"));
         assert_eq!(
@@ -632,14 +960,35 @@ pub(crate) mod tests {
         assert_eq!(s.uptime_secs, 3600);
         assert_eq!((s.tasks, s.running, s.threads), (2, 1, 40));
         assert_eq!(s.cpus.len(), 2);
-        let init = s.procs.iter().find(|p| p.pid == 1).unwrap();
+        let net = s.net.as_ref().unwrap();
+        assert_eq!(
+            net.iface.as_deref(),
+            Some("eth0"),
+            "host namespace via pid 1"
+        );
+        assert_eq!(net.addrs, ["192.168.1.57", "2a01:203:405:607::aa"]);
+        assert_eq!(net.other, ["100.64.0.5"]);
+        assert!(s.disk.is_some());
+        let procs = s.procs.as_ref().unwrap();
+        let init = procs.iter().find(|p| p.pid == 1).unwrap();
         assert_eq!(init.cmd, "/sbin/init");
         assert!((init.mem - 10.0).abs() < 1e-9);
-        assert!(s.procs.iter().any(|p| p.cmd == "[kthreadd]"));
+        assert!(procs.iter().any(|p| p.cmd == "[kthreadd]"));
         assert!(
             !mon.is_sampling(),
             "a one-off sample starts no background task"
         );
+    }
+
+    #[tokio::test]
+    async fn processes_are_opt_in() {
+        let fake = FakeProc::new();
+        let mon = monitor(&fake.0, 50, false, CancellationToken::new());
+        let s = mon.snapshot().await.unwrap();
+        assert_eq!(s.procs, None);
+        assert_eq!(s.tasks, 2, "still counted from the pid directories");
+        let json = serde_json::to_value(&*s).unwrap();
+        assert!(json.get("procs").is_none(), "{json}");
     }
 
     #[tokio::test]
@@ -648,19 +997,30 @@ pub(crate) mod tests {
         // Listed but its files are gone (the process exited mid-scan).
         std::fs::create_dir_all(fake.0.join("77")).unwrap();
         fake.write("88/stat", "garbage");
-        let mon = SystemMonitor::new(
-            fake.0.clone(),
-            Duration::from_millis(50),
-            CancellationToken::new(),
+        let mon = monitor(&fake.0, 50, true, CancellationToken::new());
+        assert_eq!(
+            mon.snapshot().await.unwrap().procs.as_ref().unwrap().len(),
+            2
         );
-        assert_eq!(mon.snapshot().await.unwrap().tasks, 2);
+    }
+
+    #[tokio::test]
+    async fn missing_network_files_are_not_fatal() {
+        let fake = FakeProc::new();
+        std::fs::remove_dir_all(fake.0.join("1/net")).unwrap();
+        std::fs::remove_file(fake.0.join("net/dev")).unwrap();
+        std::fs::remove_file(fake.0.join("diskstats")).unwrap();
+        let mon = monitor(&fake.0, 50, false, CancellationToken::new());
+        let s = mon.snapshot().await.unwrap();
+        assert_eq!((s.net.as_ref(), s.disk), (None, None));
     }
 
     #[tokio::test]
     async fn missing_proc_dir_is_an_error() {
-        let mon = SystemMonitor::new(
-            PathBuf::from("/nonexistent/cuthulu"),
-            Duration::from_millis(50),
+        let mon = monitor(
+            Path::new("/nonexistent/cuthulu"),
+            50,
+            false,
             CancellationToken::new(),
         );
         let e = mon.snapshot().await.unwrap_err();
@@ -670,11 +1030,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn samples_only_while_subscribed() {
         let fake = FakeProc::new();
-        let mon = SystemMonitor::new(
-            fake.0.clone(),
-            Duration::from_millis(30),
-            CancellationToken::new(),
-        );
+        let mon = monitor(&fake.0, 30, false, CancellationToken::new());
         assert!(!mon.is_sampling());
 
         let mut a = mon.subscribe();
@@ -682,11 +1038,17 @@ pub(crate) mod tests {
         assert!(mon.is_sampling());
         a.recv().await.unwrap().unwrap();
         fake.cpu(50, 50);
+        fake.net(1_000_000, 0);
         tokio::time::timeout(Duration::from_secs(5), async {
-            while a.recv().await.unwrap().unwrap().cpu <= 0.0 {}
+            loop {
+                let s = a.recv().await.unwrap().unwrap();
+                if s.cpu > 0.0 && s.net.as_ref().unwrap().rx > 0 {
+                    break;
+                }
+            }
         })
         .await
-        .expect("CPU% from the delta between samples");
+        .expect("CPU% and rates from the delta between samples");
 
         drop((a, b));
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -707,7 +1069,7 @@ pub(crate) mod tests {
     async fn sampler_stops_on_shutdown() {
         let fake = FakeProc::new();
         let token = CancellationToken::new();
-        let mon = SystemMonitor::new(fake.0.clone(), Duration::from_secs(3600), token.clone());
+        let mon = monitor(&fake.0, 3_600_000, false, token.clone());
         let mut rx = mon.subscribe();
         rx.recv().await.unwrap().unwrap();
         token.cancel();

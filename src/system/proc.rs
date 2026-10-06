@@ -4,6 +4,7 @@
 //! of them are unit-tested with fixture strings and none touches the disk.
 
 use std::collections::HashMap;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 /// A `/proc` file did not have the expected shape.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -294,6 +295,154 @@ pub fn parse_passwd(s: &str) -> HashMap<u32, String> {
         .collect()
 }
 
+/// `/proc/net/dev`: interface → (received bytes, transmitted bytes).
+#[must_use]
+pub fn parse_net_dev(s: &str) -> HashMap<String, (u64, u64)> {
+    s.lines()
+        .filter_map(|line| {
+            let (name, rest) = line.split_once(':')?;
+            let f: Vec<u64> = rest
+                .split_ascii_whitespace()
+                .map(str::parse)
+                .collect::<Result<_, _>>()
+                .ok()?;
+            // 8 receive counters, then transmit; bytes come first in each.
+            Some((name.trim().to_owned(), (*f.first()?, *f.get(8)?)))
+        })
+        .collect()
+}
+
+/// One IPv4 route from `/proc/net/route` (the main table).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Route {
+    pub iface: String,
+    pub dest: Ipv4Addr,
+    pub mask: Ipv4Addr,
+    pub metric: u32,
+}
+
+impl Route {
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        self.dest.is_unspecified() && self.mask.is_unspecified()
+    }
+
+    #[must_use]
+    pub fn contains(&self, ip: Ipv4Addr) -> bool {
+        u32::from(ip) & u32::from(self.mask) == u32::from(self.dest)
+    }
+}
+
+pub fn parse_route(s: &str) -> Result<Vec<Route>, ParseError> {
+    const FILE: &str = "net/route";
+    // Addresses are the raw network-order bytes printed as a host-endian
+    // hex number, so they read back with `to_le_bytes` on the (little-endian)
+    // platforms this runs on.
+    let addr = |h: &str| {
+        u32::from_str_radix(h, 16)
+            .map(|v| Ipv4Addr::from(v.to_le_bytes()))
+            .map_err(|e| err(FILE, format!("`{h}`: {e}")))
+    };
+    s.lines()
+        .skip(1)
+        .filter(|l| !l.trim().is_empty())
+        .map(|line| {
+            let f: Vec<&str> = line.split_ascii_whitespace().collect();
+            if f.len() < 8 {
+                return Err(err(FILE, "too few fields"));
+            }
+            Ok(Route {
+                iface: f[0].to_owned(),
+                dest: addr(f[1])?,
+                mask: addr(f[7])?,
+                metric: f[6].parse().map_err(|_| err(FILE, "bad metric"))?,
+            })
+        })
+        .collect()
+}
+
+/// The host's own IPv4 addresses: the `/32 host LOCAL` leaves of
+/// `/proc/net/fib_trie`, in order, without duplicates.
+#[must_use]
+pub fn parse_fib_trie_local(s: &str) -> Vec<Ipv4Addr> {
+    let mut out = Vec::new();
+    let mut leaf = None;
+    for line in s.lines() {
+        let t = line.trim();
+        if let Some(ip) = t.strip_prefix("|-- ") {
+            leaf = ip.parse::<Ipv4Addr>().ok();
+        } else if t.starts_with("+--") {
+            leaf = None;
+        } else if t == "/32 host LOCAL"
+            && let Some(ip) = leaf.filter(|ip| !out.contains(ip))
+        {
+            out.push(ip);
+        }
+    }
+    out
+}
+
+/// Global, non-temporary IPv6 addresses from `/proc/net/if_inet6`.
+#[must_use]
+pub fn parse_if_inet6(s: &str) -> Vec<(String, Ipv6Addr)> {
+    const SCOPE_GLOBAL: u8 = 0;
+    const FLAG_TEMPORARY: u32 = 0x01;
+    s.lines()
+        .filter_map(|line| {
+            let f: Vec<&str> = line.split_ascii_whitespace().collect();
+            let [addr, _, _, scope, flags, name] = f[..] else {
+                return None;
+            };
+            let addr = Ipv6Addr::from(u128::from_str_radix(addr, 16).ok()?);
+            let scope = u8::from_str_radix(scope, 16).ok()?;
+            let flags = u32::from_str_radix(flags, 16).ok()?;
+            (scope == SCOPE_GLOBAL && flags & FLAG_TEMPORARY == 0).then(|| (name.to_owned(), addr))
+        })
+        .collect()
+}
+
+/// `/proc/diskstats`: bytes (read, written) summed over whole physical
+/// disks. Partitions, loop/ram/optical devices and device-mapper/md layers
+/// are left out so nothing is counted twice.
+#[must_use]
+pub fn parse_diskstats(s: &str) -> (u64, u64) {
+    // diskstats always counts 512-byte sectors, whatever the device uses.
+    const SECTOR: u64 = 512;
+    s.lines()
+        .filter_map(|line| {
+            let f: Vec<&str> = line.split_ascii_whitespace().collect();
+            let name = *f.get(2)?;
+            if !is_whole_disk(name) {
+                return None;
+            }
+            let read: u64 = f.get(5)?.parse().ok()?;
+            let written: u64 = f.get(9)?.parse().ok()?;
+            Some((read * SECTOR, written * SECTOR))
+        })
+        .fold((0, 0), |(r, w), (dr, dw)| (r + dr, w + dw))
+}
+
+fn is_whole_disk(name: &str) -> bool {
+    const VIRTUAL: [&str; 7] = ["loop", "ram", "zram", "sr", "fd", "dm-", "md"];
+    if VIRTUAL.iter().any(|p| name.starts_with(p)) {
+        return false;
+    }
+    let stem = name.trim_end_matches(|c: char| c.is_ascii_digit());
+    if stem.len() == name.len() {
+        return true; // sda, vdb
+    }
+    if ["sd", "vd", "xvd", "hd"]
+        .iter()
+        .any(|p| name.starts_with(p))
+    {
+        return false; // sda1
+    }
+    // nvme0n1p2, mmcblk0p1: "<disk ending in a digit>p<n>" is a partition.
+    !stem
+        .strip_suffix('p')
+        .is_some_and(|d| d.ends_with(|c: char| c.is_ascii_digit()))
+}
+
 /// `a / b` for counters that comfortably fit an `f64` mantissa.
 #[allow(clippy::cast_precision_loss)]
 pub(crate) fn ratio(a: u64, b: u64) -> f64 {
@@ -466,5 +615,92 @@ SReclaimable:     400000 kB
         );
         assert_eq!(users.len(), 2);
         assert_eq!(users[&1000], "manuel");
+    }
+
+    #[test]
+    fn net_dev() {
+        let s = "Inter-|   Receive |  Transmit\n face |bytes packets|bytes\n    lo: 155 30 0 0 0 0 0 0 155 30 0 0 0 0 0 0\nwlp2s0: 1265857872 1123552 0 249 0 0 0 0 158820816 322206 0 0 0 0 0 0\n";
+        let m = parse_net_dev(s);
+        assert_eq!(m.len(), 2);
+        assert_eq!(m["wlp2s0"], (1_265_857_872, 158_820_816));
+    }
+
+    const ROUTE: &str = "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n\
+wlp2s0\t00000000\tFE01A8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0\n\
+docker0\t000011AC\t00000000\t0001\t0\t0\t0\t0000FFFF\t0\t0\t0\n\
+wlp2s0\t0001A8C0\t00000000\t0001\t0\t0\t600\t00FFFFFF\t0\t0\t0\n";
+
+    #[test]
+    fn routes() {
+        let r = parse_route(ROUTE).unwrap();
+        assert_eq!(r.len(), 3);
+        assert!(r[0].is_default());
+        assert_eq!(r[0].metric, 600);
+        assert_eq!(r[1].dest, Ipv4Addr::new(172, 17, 0, 0));
+        assert_eq!(r[1].mask, Ipv4Addr::new(255, 255, 0, 0));
+        assert!(r[2].contains(Ipv4Addr::new(192, 168, 1, 57)));
+        assert!(!r[2].contains(Ipv4Addr::new(192, 168, 2, 1)));
+        assert!(parse_route("h\nx 0 0 0\n").is_err());
+    }
+
+    #[test]
+    fn fib_trie_local_addresses() {
+        let s = "\
+Main:
+  +-- 0.0.0.0/0 3 0 5
+     |-- 192.168.1.0
+        /24 link UNICAST
+Local:
+  +-- 0.0.0.0/0 3 1 5
+     +-- 127.0.0.0/8 2 0 2
+        |-- 127.0.0.0
+           /8 host LOCAL
+        |-- 127.0.0.1
+           /32 host LOCAL
+     +-- 192.168.1.0/24 2 0 2
+        |-- 192.168.1.57
+           /32 host LOCAL
+        |-- 192.168.1.255
+           /32 link BROADCAST
+  +-- 10.0.0.0/8 2 0 2
+     |-- 192.168.1.57
+        /32 host LOCAL
+";
+        assert_eq!(
+            parse_fib_trie_local(s),
+            [Ipv4Addr::LOCALHOST, Ipv4Addr::new(192, 168, 1, 57)]
+        );
+    }
+
+    #[test]
+    fn if_inet6_global_only() {
+        let s = "\
+fe80000000000000d5df9e8b71121a39 02 40 20 80   wlp2s0
+2a0102030405060700000000000000aa 02 40 00 80   wlp2s0
+2a0102030405060700000000000000bb 02 40 00 01   wlp2s0
+00000000000000000000000000000001 01 80 10 80       lo
+";
+        let v = parse_if_inet6(s);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].0, "wlp2s0");
+        assert_eq!(v[0].1.to_string(), "2a01:203:405:607::aa");
+    }
+
+    #[test]
+    fn diskstats_whole_disks_only() {
+        let s = "\
+   7       0 loop0 14 0 34 1 0 0 0 0 0 1 1 0 0 0 0 0 0
+ 259       0 nvme0n1 100 0 1000 0 50 0 2000 0 0 0 0
+ 259       1 nvme0n1p1 10 0 100 0 5 0 200 0 0 0 0
+   8       0 sda 1 0 10 0 1 0 20 0 0 0 0
+   8       1 sda1 1 0 10 0 1 0 20 0 0 0 0
+ 179       0 mmcblk0 1 0 4 0 1 0 8 0 0 0 0
+ 179       1 mmcblk0p1 1 0 4 0 1 0 8 0 0 0 0
+ 253       0 dm-0 1 0 999 0 1 0 999 0 0 0 0
+";
+        assert_eq!(
+            parse_diskstats(s),
+            ((1000 + 10 + 4) * 512, (2000 + 20 + 8) * 512)
+        );
     }
 }

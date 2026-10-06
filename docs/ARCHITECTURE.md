@@ -13,7 +13,7 @@ this file in the same change when a decision moves.
                           ├── registry  : in-memory view of all services
                           ├── providers
                           │     └── docker ──unix socket──▶ /var/run/docker.sock
-                          └── system    : host CPU/memory/processes ──▶ procfs (read-only)
+                          └── system    : host CPU/memory/network/disk ──▶ procfs (read-only)
 ```
 
 One process, one binary, no database. Docker is the source of truth; the
@@ -65,8 +65,9 @@ src/
     docker.rs          bollard-backed implementation (the only bollard user)
     lines.rs           log chunk → line splitting, timestamp parsing, ANSI stripping
   system/
-    mod.rs             SystemMonitor: on-demand shared sampler, Snapshot, top-process selection
-    proc.rs            pure parsers for /proc/stat, meminfo, loadavg, uptime, [pid]/stat|status|cmdline, /etc/passwd
+    mod.rs             SystemMonitor: on-demand shared sampler, Snapshot, rates, addresses, top processes
+    proc.rs            pure parsers for /proc/stat, meminfo, loadavg, uptime, diskstats, net/{dev,route,fib_trie,if_inet6},
+                       [pid]/stat|status|cmdline, /etc/passwd
 templates/             base, index, service, not_found
 static/                app.css, app.js, theme.js, eye.svg, fonts/
 ```
@@ -155,7 +156,7 @@ services.
 | POST   | `/api/services/{id}/start\|stop\|restart` | Returns the updated service |
 | GET    | `/api/services/{id}/logs`          | SSE log stream; `?tail=` (≤ 10 000), `?follow=` |
 | GET    | `/api/events`                      | SSE registry stream |
-| GET    | `/api/system`                      | JSON host snapshot (CPU, memory, load, top processes); 503 if procfs is unreadable |
+| GET    | `/api/system`                      | JSON host snapshot (CPU, memory, load, network, disk I/O, opt-in top processes); 503 if procfs is unreadable |
 | GET    | `/api/system/stream`               | SSE host snapshots, one per `CUTHULU_SYSTEM_SECS` |
 
 Errors: JSON `{ "error": "...", "code": "bad_request|forbidden|not_found|unavailable|internal" }`.
@@ -193,35 +194,53 @@ data is empty.
 
 The dashboard's host panel is **not** a `Provider`: the host is not a service
 source and has no actions. `src/system/` reads procfs directly — no PTY, no
-`htop`/`ps` or any other binary, so it works in the `scratch` image.
+`htop`/`ps`/`ip`/speedtest or any other binary, so it works in the `scratch`
+image.
 
 - **What is read:** `stat` (aggregate + per-core CPU ticks), `meminfo`
   (used = `MemTotal − MemAvailable`, falling back to htop's
   free/buffers/cache formula on old kernels), `loadavg` (load, runnable and
-  total threads), `uptime`, `sys/kernel/hostname` (skipped inside a Docker
-  container, where it names the container), and per pid `stat`
-  (utime+stime, start time) and `status` (uid, `VmRSS`). `cmdline` is read
-  only for the processes that make the top lists. Uids are named from
-  `/etc/passwd` when it is readable (read once at startup).
-- **CPU%** is a delta between two reads. A one-off `GET /api/system` with no
-  recent baseline reads twice, 250 ms apart. Per-process CPU% is relative to
-  one core like htop (its ticks over the wall-clock ticks elapsed, i.e. the
-  aggregate delta divided by the number of cores), so it can exceed 100.
-  Processes are matched across reads by pid *and* start time, so a reused
-  pid never inherits another process's ticks.
-- **Top processes:** the snapshot carries the union of the top 10 by CPU and
-  the top 10 by RSS (≤ 20 rows), so the client can sort by either without
-  another request.
+  total threads), `uptime`, `diskstats`, `sys/kernel/hostname` (skipped
+  inside a Docker container, where it names the container), and the
+  network files below. The pid directories are only counted (`tasks`).
+- **Network:** `net/dev` (byte counters), `net/route` (the default route
+  picks the primary interface; the longest matching prefix maps each address
+  to its interface), `net/fib_trie` (the host's IPv4 addresses: its
+  `/32 host LOCAL` leaves) and `net/if_inet6` (global, non-temporary IPv6).
+  `<proc>/net` links to `self/net`, the *reader's* network namespace — in a
+  container that is the container's — so `<proc>/1/net` (pid 1, the host's
+  namespace) is read first, falling back to `<proc>/net`. Loopback and
+  container/VM plumbing (`docker*`, `br-*`, `veth*`, `virbr*`, `cni*`,
+  `flannel*`, `cali*`, `vxlan*`) are left out. Addresses without a
+  main-table route (e.g. a VPN using its own table) are listed without an
+  interface.
+- **Rates** (CPU%, network ↓/↑ and disk read/write) are deltas between two
+  reads over the time between them. "Network speed" is the *current
+  throughput* of the default-route interface, not a bandwidth test: that
+  would need an external server and generate traffic. Disk I/O sums whole
+  physical disks only (partitions, loop, ram, optical, `dm-*` and `md*` are
+  skipped so nothing counts twice). A one-off `GET /api/system` with no
+  recent baseline reads twice, 250 ms apart.
+- **Processes (opt-in, `CUTHULU_SYSTEM_PROCESSES`):** per pid `stat`
+  (utime+stime, start time) and `status` (uid, `VmRSS`); `cmdline` only for
+  the processes that make the top lists; uids named from `/etc/passwd` when
+  readable (read once at startup). Per-process CPU% is relative to one core
+  like htop, so it can exceed 100; processes are matched across reads by
+  pid *and* start time, so a reused pid never inherits another process's
+  ticks. The snapshot carries the union of the top 10 by CPU and the top 10
+  by RSS (≤ 20 rows) so the client can sort by either; `procs` is absent
+  from the JSON when disabled, and no per-pid file is read at all.
 - **Robustness:** pids that vanish mid-scan, or are hidden by `hidepid`, are
-  skipped. An unreadable proc dir is an error (`503` / `failure` event), not
-  a crash.
+  skipped. Unreadable network or disk files just leave `net` / `disk` null.
+  An unreadable proc dir (`stat`, `meminfo`, …) is an error (`503` /
+  `failure` event), not a crash.
 - **Cost:** one shared sampler task, started by the first subscriber and
   stopped at the next tick after the last one leaves (the receiver count is
   checked under the same lock that starts it, so no subscriber is ever left
-  without a sampler). Nobody watching = no sampling. Each tick reads two
-  small files per process; the work runs on the blocking pool.
-- **Bounded:** broadcast capacity 4; ≤ 20 processes per snapshot; command
-  lines cut at 512 bytes.
+  without a sampler). Nobody watching = no sampling. Without processes a
+  tick reads about ten small files; the work runs on the blocking pool.
+- **Bounded:** broadcast capacity 4; ≤ 8 addresses per list; ≤ 20
+  processes per snapshot; command lines cut at 512 bytes.
 
 > **Decision (2026-10):** host updates use a dedicated
 > `/api/system/stream` instead of a new event on `/api/events`. Every page
@@ -230,6 +249,11 @@ source and has no actions. `src/system/` reads procfs directly — no PTY, no
 > lifetime to the panel: the client opens it only while the panel is
 > expanded and the tab visible. Snapshots also need different lag handling
 > (skip, not resync).
+
+> **Decision (2026-10):** the process list is off by default
+> (`CUTHULU_SYSTEM_PROCESSES=true` enables it). The panel is for an
+> at-a-glance view of the machine; per-process detail is noise for most
+> users and the most expensive part of a sample.
 
 ## Self-awareness
 
@@ -249,6 +273,7 @@ allowed after a confirmation.
 | `CUTHULU_RECONCILE_SECS` | `60`                           | Full re-list interval |
 | `CUTHULU_PROC_DIR`       | `/proc` (compose: `/host/proc`) | procfs the host panel reads; mount the host's read-only in a container |
 | `CUTHULU_SYSTEM_SECS`    | `2`                            | Host panel sampling interval (1–60), only while someone watches |
+| `CUTHULU_SYSTEM_PROCESSES` | `false`                      | Also list the top processes (by CPU / memory) in the host panel |
 | `RUST_LOG`               | `info`                         | Tracing filter |
 
 Planned: `CUTHULU_AUTH_TOKEN` (phase 5).

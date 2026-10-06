@@ -75,11 +75,7 @@ async fn run() -> anyhow::Result<()> {
         listener.local_addr()?
     );
 
-    let system = SystemMonitor::new(
-        config.proc_dir.clone(),
-        config.system_interval,
-        shutdown.clone(),
-    );
+    let system = SystemMonitor::new(&config, shutdown.clone());
     let app = server::router(AppState {
         registry,
         config: Arc::new(config),

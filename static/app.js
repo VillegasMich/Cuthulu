@@ -543,6 +543,13 @@ function fmtBytes(b) {
 const level = (pct, warn, err) => (pct >= err ? "err" : pct >= warn ? "warn" : "ok");
 
 const METER_W = 26; // ch per CPU meter: label 4 + "[" + bar 20 + "]"
+const SYS_TOP = 10; // processes listed (the server sends the top 10 by CPU and by memory)
+
+/** Bytes per second, padded so the line does not jitter: "  1.2M/s". */
+const fmtRate = (b) => `${b < 1024 ? `${b}B` : fmtBytes(b)}/s`.padStart(7);
+
+/** Network speed the way ISPs quote it, for tooltips. */
+const fmtBits = (b) => `${((b * 8) / 1e6).toFixed(2)} Mbit/s`;
 const METER_GAP = 2; // ch between meter columns
 
 /**
@@ -612,25 +619,40 @@ function initSystem() {
     fill($("#sys-mem"), usage("Mem ", s.mem, 75, 90), usage("Swp ", s.swap, 50, 80));
 
     const ncpu = n || 1;
-    const k = (t) => el("span", { class: "k" }, t);
-    fill(
-      $("#sys-info"),
-      el("div", {},
-        k("Load "),
+    const rows = [
+      ["Load", [
         el("span", { class: `lv-${level((s.load[0] / ncpu) * 100, 70, 100)}` }, s.load[0].toFixed(2)),
         ` ${s.load[1].toFixed(2)} ${s.load[2].toFixed(2)}`,
-      ),
-      el("div", {}, k("Tasks "), `${s.tasks}, ${s.threads} threads; ${s.running} running`),
-      el("div", {}, k("Up    "), fmtDur(s.uptime_secs * 1000)),
-    );
+      ]],
+      ["Tasks", [`${s.tasks}, ${s.threads} threads; ${s.running} running`]],
+      ["Up", [fmtDur(s.uptime_secs * 1000)]],
+    ];
+    if (s.net) {
+      const net = s.net;
+      rows.push(["Net", [
+        net.iface ? `${net.iface}  ` : "",
+        el("span", { title: `download ${fmtBits(net.rx)}` }, `↓ ${fmtRate(net.rx)}`),
+        "  ",
+        el("span", { title: `upload ${fmtBits(net.tx)}` }, `↑ ${fmtRate(net.tx)}`),
+      ]]);
+      if (net.addrs.length) rows.push(["IP", net.addrs.map((a) => el("div", {}, a))]);
+      if (net.other.length) rows.push(["", net.other.map((a) => el("div", { class: "muted" }, a))]);
+    }
+    if (s.disk) {
+      rows.push(["Disk", [`read ${fmtRate(s.disk.read)}  write ${fmtRate(s.disk.write)}`]]);
+    }
+    fill($("#sys-info"), ...rows.flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, ...v)]));
+
+    $("#sys-procs-box").hidden = !s.procs;
+    if (!s.procs) return;
 
     for (const th of root.querySelectorAll("th[data-sort]")) {
       const on = (th.dataset.sort === "mem") === byMem;
       th.setAttribute("aria-sort", on ? "descending" : "none");
     }
     const key = byMem ? (p) => p.rss : (p) => p.cpu;
-    const procs = [...s.procs].sort((a, b) => key(b) - key(a) || a.pid - b.pid).slice(0, s.top);
-    const rows = procs.map((p) =>
+    const procs = [...s.procs].sort((a, b) => key(b) - key(a) || a.pid - b.pid).slice(0, SYS_TOP);
+    const procRows = procs.map((p) =>
       el(
         "tr",
         {},
@@ -643,7 +665,7 @@ function initSystem() {
       ),
     );
     const body = $("#sys-procs");
-    if (rows.length) body.replaceChildren(...rows);
+    if (procRows.length) body.replaceChildren(...procRows);
     else body.replaceChildren(el("tr", { class: "placeholder" }, el("td", { colspan: "6" }, "no processes visible")));
   }
 

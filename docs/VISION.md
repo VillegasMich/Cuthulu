@@ -63,7 +63,7 @@ their own Linux workstation or home server.
 | 9 | see CPU / memory usage per service                             | Next  |
 | 10| monitor non-Docker services (systemd units, plain processes)   | Later |
 | 11| get a desktop notification when a service dies                 | Later |
-| 12| see host CPU / memory and the busiest processes at a glance    | Done  |
+| 12| see host CPU / memory / network at a glance                    | Done  |
 
 ## Success criteria for the MVP
 

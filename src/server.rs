@@ -87,11 +87,7 @@ mod tests {
             read_only,
             ..Config::default()
         };
-        let system = SystemMonitor::new(
-            config.proc_dir.clone(),
-            config.system_interval,
-            shutdown.clone(),
-        );
+        let system = SystemMonitor::new(&config, shutdown.clone());
         let app = router(AppState {
             registry: Arc::clone(&registry),
             config: Arc::new(config),
@@ -257,10 +253,9 @@ mod tests {
         assert!(text.contains("\"name\":\"web\""));
     }
 
-    fn app_with_proc(dir: std::path::PathBuf) -> (Router, Arc<SystemMonitor>) {
+    fn app_with_proc(dir: &std::path::Path) -> (Router, Arc<SystemMonitor>) {
         let shutdown = CancellationToken::new();
-        let system =
-            SystemMonitor::new(dir, std::time::Duration::from_millis(50), shutdown.clone());
+        let system = crate::system::tests::monitor(dir, 50, true, shutdown.clone());
         let app = router(AppState {
             registry: Registry::new(vec![]),
             config: Arc::new(Config::default()),
@@ -273,7 +268,7 @@ mod tests {
     #[tokio::test]
     async fn system_snapshot_from_proc_dir() {
         let fake = crate::system::tests::FakeProc::new();
-        let (app, _) = app_with_proc(fake.0.clone());
+        let (app, _) = app_with_proc(&fake.0);
         let (status, headers, body) = send(&app, get("/api/system")).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(headers[header::CONTENT_TYPE], "application/json");
@@ -282,6 +277,9 @@ mod tests {
         assert_eq!(snap["cpus"].as_array().unwrap().len(), 2);
         assert_eq!(snap["mem"]["total"], 1_024_000);
         assert_eq!(snap["load"][0], 0.5);
+        assert_eq!(snap["net"]["iface"], "eth0");
+        assert_eq!(snap["net"]["addrs"][0], "192.168.1.57");
+        assert!(snap["disk"]["read"].is_u64());
         assert!(
             snap["procs"]
                 .as_array()
@@ -293,7 +291,7 @@ mod tests {
 
     #[tokio::test]
     async fn system_unavailable_without_proc() {
-        let (app, _) = app_with_proc("/nonexistent/cuthulu".into());
+        let (app, _) = app_with_proc(std::path::Path::new("/nonexistent/cuthulu"));
         let (status, _, body) = send(&app, get("/api/system")).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert!(body.contains("\"code\":\"unavailable\""), "{body}");
@@ -312,7 +310,7 @@ mod tests {
     #[tokio::test]
     async fn system_stream_samples_only_while_open() {
         let fake = crate::system::tests::FakeProc::new();
-        let (app, system) = app_with_proc(fake.0.clone());
+        let (app, system) = app_with_proc(&fake.0);
         assert!(!system.is_sampling());
 
         let res = app.oneshot(get("/api/system/stream")).await.unwrap();

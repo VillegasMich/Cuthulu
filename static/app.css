@@ -295,8 +295,16 @@ ul.plain { margin: 4px 0 0; padding-left: 2ch; list-style: none; }
 .meter .fill.ok, .lv-ok { color: var(--ok); }
 .meter .fill.warn, .lv-warn { color: var(--warn); }
 .meter .fill.err, .lv-err { color: var(--err); }
-.sys-info { margin-top: 2px; white-space: pre; }
-.sys-info .k { color: var(--muted); }
+.sys-info {
+  display: grid;
+  grid-template-columns: max-content auto;
+  gap: 0 1ch;
+  align-content: start;
+  margin: 0;
+  white-space: pre;
+}
+.sys-info dt { color: var(--muted); }
+.sys-info dd { margin: 0; }
 
 .sys-procs { flex: 1 1 60ch; min-width: 0; }
 .procs { width: 100%; border-collapse: collapse; table-layout: fixed; }
