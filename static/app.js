@@ -76,6 +76,16 @@ function portsText(ports) {
     .join(", ");
 }
 
+/** Image reference as [repo, tag span] (`:0.2.0`, `@sha256:…`); mirrors split_image in web.rs. */
+function imageParts(image) {
+  if (!image) return [""];
+  const nameStart = image.lastIndexOf("/") + 1;
+  const colon = image.indexOf(":", nameStart);
+  const cut = Math.min(...[image.indexOf("@"), colon].filter((i) => i > 0), image.length);
+  if (cut === image.length) return [image];
+  return [image.slice(0, cut), el("span", { class: "img-tag" }, image.slice(cut))];
+}
+
 const svcUrl = (id) => `/services/${encodeURIComponent(id)}`;
 
 function typing(e) {
@@ -304,7 +314,7 @@ function initIndex() {
         s.is_self ? el("span", { class: "self" }, "(this)") : null,
       ),
       el("td", { class: "c-group", title: s.group || "" }, s.group || ""),
-      el("td", { class: "c-image", title: s.image || "" }, s.image || ""),
+      el("td", { class: "c-image", title: s.image || "" }, ...imageParts(s.image)),
       el("td", { class: "c-ports" }, portsText(s.ports)),
       el("td", { class: "c-up num" }, uptime(s)),
       el("td", { class: "c-act" }, ...actionButtons(s)),

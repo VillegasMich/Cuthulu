@@ -16,15 +16,19 @@
     <div class="actions" id="actions"></div>
 
     <dl class="kv">
-      <dt>image</dt><dd>{% if let Some(image) = d.service.image %}{{ image }}{% else %}—{% endif %}</dd>
+      <dt>image</dt><dd class="wrap">{% if let Some((repo, tag)) = self.image_parts() %}{{ repo }}{% if !tag.is_empty() %}<span class="img-tag">{{ tag }}</span>{% endif %}{% else %}—{% endif %}</dd>
       <dt>id</dt><dd title="{{ d.service.id }}">{{ self.short_id() }}</dd>
-      {% if let Some(group) = d.service.group %}<dt>project</dt><dd>{{ group }}</dd>{% endif %}
+      {% if let Some(group) = d.service.group %}<dt>project</dt><dd class="project">{{ group }}</dd>{% endif %}
       <dt>created</dt><dd class="time" data-time="{% if let Some(c) = d.created_at %}{{ c }}{% endif %}">—</dd>
       <dt>command</dt><dd class="wrap">{% if let Some(cmd) = d.command %}{{ cmd }}{% else %}—{% endif %}</dd>
       <dt>restart</dt>
       <dd>{% if let Some(p) = d.restart_policy %}{{ p }}{% else %}no{% endif %} · {{ d.restart_count }} restarts</dd>
       <dt>ports</dt>
-      <dd>{% for p in d.service.ports %}<div>{{ p }}</div>{% else %}—{% endfor %}</dd>
+      <dd>
+        {% for p in d.service.ports %}
+        <div>{% if let Some(hp) = p.host_port %}{% if let Some(ip) = p.host_ip %}<span class="muted">{% if ip.contains(":") %}[{{ ip }}]{% else %}{{ ip }}{% endif %}:</span>{% endif %}{{ hp }}->{% endif %}{{ p.container_port }}<span class="muted">/{{ p.protocol }}</span></div>
+        {% else %}—{% endfor %}
+      </dd>
       <dt>networks</dt>
       <dd>{% for n in d.networks %}<div>{{ n }}</div>{% else %}—{% endfor %}</dd>
       <dt>mounts</dt>
