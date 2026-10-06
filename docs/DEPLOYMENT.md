@@ -111,7 +111,8 @@ DOCKER_GID=$(stat -c %g /var/run/docker.sock) docker compose up -d
 ```
 
 `docker compose up -d` re-creates the container when `.env` changes. With
-plain `docker run`, pass `--env-file .env`.
+plain `docker run`, pass `--env-file .env`. `cargo run` reads the same file
+from the directory it is started in (real environment variables win).
 
 ### Email (Gmail example)
 
@@ -240,7 +241,8 @@ cargo run
 The user running it must be in the `docker` group. In debug builds the
 `static/` files are read from disk, so CSS/JS edits show up on reload.
 TODOs are saved to `./data/todos.json` (git-ignored); set `CUTHULU_DATA_DIR`
-to put them elsewhere.
+to put them elsewhere. Settings in `./.env` (see `.env.example`) are picked
+up automatically; variables set in the shell override them.
 
 ## Security
 

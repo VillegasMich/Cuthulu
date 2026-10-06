@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use cuthulu::config::Config;
+use cuthulu::envfile::{self, EnvFile};
 use cuthulu::notify::Notifier;
 use cuthulu::providers::docker::DockerProvider;
 use cuthulu::registry::Registry;
@@ -24,12 +25,15 @@ USAGE:
     cuthulu healthcheck   exit 0 if the local server answers /healthz
     cuthulu --version
 
-Configuration is read from CUTHULU_* environment variables, see docs/ARCHITECTURE.md.";
+Configuration is read from CUTHULU_* environment variables, and from ./.env
+when it exists (the real environment wins), see docs/ARCHITECTURE.md.";
 
 fn main() -> anyhow::Result<ExitCode> {
     match std::env::args().nth(1).as_deref() {
         None => {}
-        Some("healthcheck") => return Ok(healthcheck()),
+        Some("healthcheck") => {
+            return Ok(healthcheck(&EnvFile::load(envfile::FILE_NAME.as_ref())?));
+        }
         Some("-V" | "--version") => {
             println!("cuthulu {}", env!("CARGO_PKG_VERSION"));
             return Ok(ExitCode::SUCCESS);
@@ -44,22 +48,30 @@ fn main() -> anyhow::Result<ExitCode> {
         }
     }
 
+    // Before tracing, so RUST_LOG may come from the file too.
+    let env = EnvFile::load(envfile::FILE_NAME.as_ref())?;
     tracing_subscriber::fmt()
         .with_ansi(std::io::stdout().is_terminal())
         .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+            env.lookup("RUST_LOG")
+                .and_then(|f| EnvFilter::try_new(f).ok())
+                .unwrap_or_else(|| EnvFilter::new("info")),
         )
         .init();
+    if let Some(path) = env.path() {
+        // Names only: values may be secrets.
+        info!(path = %path.display(), keys = ?env.keys(), "settings read from env file");
+    }
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(run())?;
+        .block_on(run(&env))?;
     Ok(ExitCode::SUCCESS)
 }
 
-async fn run() -> anyhow::Result<()> {
-    let config = Config::from_env()?;
+async fn run(env: &EnvFile) -> anyhow::Result<()> {
+    let config = Config::from_lookup(|k| env.lookup(k))?;
     let docker = DockerProvider::connect(&config.docker_host)
         .with_context(|| format!("cannot use docker at {}", config.docker_host))?;
 
@@ -130,8 +142,9 @@ async fn shutdown_signal(token: CancellationToken) {
 }
 
 /// Used as the container HEALTHCHECK, since the image has no curl.
-fn healthcheck() -> ExitCode {
-    let bind = Config::from_env().map_or_else(|_| Config::default().bind, |c| c.bind);
+fn healthcheck(env: &EnvFile) -> ExitCode {
+    let bind =
+        Config::from_lookup(|k| env.lookup(k)).map_or_else(|_| Config::default().bind, |c| c.bind);
     let ip = match bind.ip() {
         IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
         IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),

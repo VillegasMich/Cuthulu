@@ -53,6 +53,7 @@ src/
   main.rs              CLI (run | healthcheck | --version), tracing, graceful shutdown
   lib.rs
   config.rs            CUTHULU_* env parsing (pure, unit-tested via a lookup fn)
+  envfile.rs           optional ./.env reader layered under the real environment
   model.rs             Service, ServiceId, ServiceState, Action, LogLine, …
   registry.rs          in-memory state, watch loop per provider, broadcast; MockProvider for tests
   server.rs            AppState, router, security headers; HTTP-level tests
@@ -405,6 +406,17 @@ id starts with `$HOSTNAME`. Stop is refused for it (UI and API); restart is
 allowed after a confirmation.
 
 ## Configuration
+
+Settings come from environment variables. A `.env` file in the working
+directory is read too (so `cargo run` sees the same settings as
+`docker compose`, which reads that file): Compose syntax without
+interpolation — `KEY=value`, `#` comments, optional `export`, `'literal'` or
+`"escaped"` quotes. The real environment always wins over the file, the file
+is never copied into the process environment (the crate forbids `unsafe`, and
+`set_var` is unsafe in edition 2024), and only variable *names* are logged. A
+malformed file stops startup with the line number, never the value. In the
+image the working directory is `/` and `.env` is excluded from the build
+context, so containers get their settings from Compose as before.
 
 | Variable                 | Default                        | Meaning |
 |--------------------------|--------------------------------|---------|
