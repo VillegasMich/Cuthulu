@@ -325,7 +325,7 @@ pub(crate) mod tests {
     async fn add_toggle_delete_and_persist() {
         let dir = TempDir::new();
         let store = TodoStore::open(dir.path());
-        assert!(store.list("web").await.unwrap().is_empty());
+        assert_eq!(store.list("web").await.unwrap(), Vec::<Todo>::new());
 
         store.add("web", "first").await.unwrap();
         let list = store.add("web", "second").await.unwrap();
@@ -406,12 +406,12 @@ pub(crate) mod tests {
         fs::write(&blocker, "").unwrap();
         let store = TodoStore::open(&blocker.join("data"));
 
-        assert!(store.list("web").await.unwrap().is_empty());
+        assert_eq!(store.list("web").await.unwrap(), Vec::<Todo>::new());
         let err = store.add("web", "x").await.unwrap_err();
         assert!(matches!(err, TodoError::Storage(_)));
         assert!(err.to_string().contains("cannot save todos"), "{err}");
         // The failed write did not leak into the cache.
-        assert!(store.list("web").await.unwrap().is_empty());
+        assert_eq!(store.list("web").await.unwrap(), Vec::<Todo>::new());
     }
 
     #[tokio::test]
