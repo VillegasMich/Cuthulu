@@ -43,7 +43,7 @@ cargo clippy --all-targets -- -D warnings
 ```
 
 Keyboard: `/` filter · `j`/`k` move · `enter` open · `s` start/stop ·
-`r` restart · `t` theme · `?` help.
+`r` restart · `a` show stopped · `t` theme · `esc` back · `?` help.
 
 ## Docs
 

@@ -76,17 +76,26 @@ stores an explicit choice in `localStorage` and sets `data-theme` on `<html>`.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│ (◉) cuthulu   3 running · 0 stopped     [/ filter…]   [all▾]  [t]   │
+│ [←] (◉) cuthulu   3 running · 1 stopped (hidden)     ● docker  [☾]  │
 ├──────────────────────────────────────────────────────────────────────┤
+│ [/ filter…]   [ ] show stopped                                       │
 │ STATE    NAME                     IMAGE                      UPTIME  │
 │ ● run    auto-git-commit-tool     villegasmich/auto-git…:0.2.0  20m  │
 │ ● run    claude-session-starter   villegasmich/claude-ses…:0.1.0 20m │
 │ ● run    producer-tag-on-merge    villegasmich/producer-t…:0.1.0 20m │
-│ ○ exit 1 some-old-thing           postgres:16                    —   │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-- Top bar: logo/eye, counts, filter input, state filter, theme toggle.
+- Top bar: back arrow, logo/eye, counts, connection state, theme toggle.
+  - Back (`←`) goes to the previous cuthulu page in this tab's history, or to
+    `/` when there is none. On the dashboard without history it is hidden but
+    keeps its slot, so the eye never shifts between pages.
+  - The theme toggle shows the *current* theme: a sun in light, a moon in dark
+    (pure CSS, so it also follows `prefers-color-scheme` live).
+- Toolbar (dashboard): filter input and a `show stopped` checkbox. Stopped
+  services are hidden by default (only `running` / `restarting` / `paused`
+  rows show); the counts keep the full totals and mark the hidden part. The
+  choice is stored in `localStorage` (`cuthulu.index.stopped`).
 - Main: sortable table. Sticky header. Row actions appear on hover/focus
   (`start` / `stop` / `restart` as small text buttons).
 - Detail view: two panes — metadata on the left (narrow), logs on the right
@@ -107,6 +116,14 @@ stores an explicit choice in `localStorage` and sets `data-theme` on `<html>`.
   `--muted` and struck through. An input + `add` button below; Enter adds.
   The list scrolls past 40vh. No new color tokens.
 
+## Icons
+
+Text labels win by default. The few icons (the eye, back arrow, sun/moon) are
+hand-written inline SVGs: 14px in a 24-unit viewBox, `fill: none`,
+`stroke: currentColor`, round caps/joins, no fills except the pupil. Icon
+buttons (`.btn.icon`) keep the box of a text `.btn`, are `--muted` until
+hover, and always carry `aria-label` + `title`.
+
 ## Keyboard shortcuts
 
 | Key        | Action |
@@ -117,8 +134,9 @@ stores an explicit choice in `localStorage` and sets `data-theme` on `<html>`.
 | `l`        | open logs of selected service |
 | `s`        | start / stop selected (stop asks for confirmation) |
 | `r`        | restart selected |
+| `a`        | show / hide stopped services |
 | `t`        | toggle theme |
-| `Esc`      | back / close / clear filter |
+| `Esc`      | back (same as the back arrow) / close / clear filter / clear selection |
 | `?`        | show shortcuts |
 
 ## The eye
