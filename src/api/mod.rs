@@ -5,6 +5,7 @@ mod events;
 mod guard;
 mod logs;
 mod services;
+mod todos;
 
 use axum::Router;
 use axum::routing::{get, post};
@@ -21,6 +22,9 @@ pub fn router() -> Router<AppState> {
         .route("/services/{id}", get(services::detail))
         .route("/services/{id}/logs", get(logs::stream))
         .route("/services/{id}/{action}", post(services::act))
+        .route("/services/{id}/todos", get(todos::list).post(todos::create))
+        .route("/services/{id}/todos/{todo_id}/toggle", post(todos::toggle))
+        .route("/services/{id}/todos/{todo_id}/delete", post(todos::delete))
         .route("/events", get(events::stream))
 }
 

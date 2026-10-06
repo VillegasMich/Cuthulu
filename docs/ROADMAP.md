@@ -41,6 +41,7 @@ Each phase should end in something runnable. Tick items as they land.
 - [x] Render ANSI colors in logs instead of stripping them
 - [x] Highlight log level keywords on uncolored lines
 - [ ] Download logs
+- [x] Per-service TODO list on the detail page (`CUTHULU_DATA_DIR/todos.json`)
 
 ## Later
 - CPU / memory stats per service (on demand, only for visible rows)

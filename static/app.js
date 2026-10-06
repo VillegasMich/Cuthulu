@@ -557,6 +557,126 @@ function initService() {
   open();
 }
 
+// ── service todos ──────────────────────────────────────────
+
+function initTodos() {
+  const id = $("#detail").dataset.id;
+  const list = $("#todo-list");
+  const count = $("#todo-count");
+  const errBox = $("#todo-error");
+  const form = $("#todo-form");
+  const input = $("#todo-text");
+  const base = `/api/services/${encodeURIComponent(id)}/todos`;
+  let todos = [];
+  let loaded = false;
+  let busy = false;
+
+  function showError(msg) {
+    errBox.textContent = msg;
+    errBox.hidden = !msg;
+  }
+
+  function item(t) {
+    const mark = t.done ? "[x]" : "[ ]";
+    const when = `added ${fmtAgo(t.created_at)}` + (t.done_at ? ` · done ${fmtAgo(t.done_at)}` : "");
+    const check = readOnly
+      ? el("span", { class: "todo-check" }, mark)
+      : el(
+          "button",
+          {
+            class: "todo-check",
+            type: "button",
+            "data-focus": `check-${t.id}`,
+            "aria-pressed": String(t.done),
+            title: t.done ? "mark open" : "mark done",
+            onclick: () => send(`${base}/${t.id}/toggle`),
+          },
+          mark,
+        );
+    return el(
+      "li",
+      { class: t.done ? "todo done" : "todo" },
+      check,
+      el("span", { class: "todo-text", title: when }, t.text),
+      readOnly
+        ? null
+        : el(
+            "button",
+            {
+              class: "btn danger todo-del",
+              type: "button",
+              title: "delete",
+              onclick: () => send(`${base}/${t.id}/delete`),
+            },
+            "del",
+          ),
+    );
+  }
+
+  function draw() {
+    // Re-rendering replaces the buttons; keep keyboard focus on the same item.
+    const focused = document.activeElement?.dataset?.focus;
+    const done = todos.filter((t) => t.done).length;
+    count.textContent = todos.length ? `${done}/${todos.length}` : "";
+    count.title = `${done} of ${todos.length} done`;
+    if (todos.length) list.replaceChildren(...todos.map(item));
+    else list.replaceChildren(el("li", { class: "todo-empty muted" }, loaded ? "nothing to do" : "…"));
+    if (focused) list.querySelector(`[data-focus="${CSS.escape(focused)}"]`)?.focus();
+  }
+
+  async function request(url, init) {
+    const res = await fetch(url, init);
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || res.statusText);
+    return body;
+  }
+
+  /** POSTs a change; the server answers with the service's full list. */
+  async function send(url, payload) {
+    if (busy) return false;
+    busy = true;
+    try {
+      const headers = { "X-Cuthulu": "1" };
+      if (payload) headers["Content-Type"] = "application/json";
+      todos = await request(url, {
+        method: "POST",
+        headers,
+        body: payload ? JSON.stringify(payload) : undefined,
+      });
+      showError("");
+      return true;
+    } catch (e) {
+      showError(`todo: ${e.message}`);
+      return false;
+    } finally {
+      busy = false;
+      draw();
+    }
+  }
+
+  form?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const text = input.value.trim();
+    if (!text) return;
+    if (await send(base, { text })) input.value = "";
+  });
+
+  draw();
+  request(base)
+    .then((t) => {
+      todos = t;
+      loaded = true;
+      draw();
+    })
+    .catch((e) => {
+      loaded = true;
+      draw();
+      showError(`todo: ${e.message}`);
+    });
+}
+
+if (page === "service") initTodos();
+
 // ── boot ───────────────────────────────────────────────────
 
 $("#theme").addEventListener("click", toggleTheme);

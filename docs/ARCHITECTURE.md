@@ -16,7 +16,8 @@ this file in the same change when a decision moves.
 ```
 
 One process, one binary, no database. Docker is the source of truth; the
-registry is a cache of it kept current by events.
+registry is a cache of it kept current by events. The only state Cuthulu owns
+itself (per-service TODOs) lives in one JSON file in `CUTHULU_DATA_DIR`.
 
 ## Stack
 
@@ -51,12 +52,14 @@ src/
   registry.rs          in-memory state, watch loop per provider, broadcast; MockProvider for tests
   server.rs            AppState, router, security headers; HTTP-level tests
   web.rs               askama page handlers, embedded asset handler (ETag)
+  todos.rs             per-service TODO store: JSON file, in-memory cache, atomic writes
   api/
     mod.rs             /api router
     services.rs        list / detail / actions
     events.rs          SSE: registry changes
     logs.rs            SSE: log lines
     guard.rs           CSRF / same-origin check for POSTs
+    todos.rs           per-service TODO list / create / toggle / delete
     error.rs           ApiError → JSON { error, code }
   providers/
     mod.rs             Provider trait, ProviderError, ProviderEvent
@@ -152,6 +155,10 @@ services.
 | POST   | `/api/services/{id}/start\|stop\|restart` | Returns the updated service |
 | GET    | `/api/services/{id}/logs`          | SSE log stream; `?tail=` (≤ 10 000), `?follow=` |
 | GET    | `/api/events`                      | SSE registry stream |
+| GET    | `/api/services/{id}/todos`         | The service's TODO items, oldest first |
+| POST   | `/api/services/{id}/todos`         | Add an item, body `{"text": "..."}`; returns the list |
+| POST   | `/api/services/{id}/todos/{todo_id}/toggle` | Flip done; returns the list |
+| POST   | `/api/services/{id}/todos/{todo_id}/delete` | Remove; returns the list |
 
 Errors: JSON `{ "error": "...", "code": "bad_request|forbidden|not_found|unavailable|internal" }`.
 
@@ -198,6 +205,30 @@ data is empty.
 - Backpressure is natural: the SSE body is only polled as fast as the client
   reads, which in turn slows the read from Docker.
 
+## Service TODOs
+
+Each service has a small TODO list on its detail page.
+
+- **Keyed by service name**, not id: the name survives `docker compose up`
+  re-creating the container, the id does not. `{id}` in the URL must belong
+  to a service the registry currently knows; it is resolved to its name.
+  Items of services that disappeared stay in the file. (If a second provider
+  ever produces clashing names, the key will need a provider prefix.)
+- **Storage:** `<CUTHULU_DATA_DIR>/todos.json`,
+  `{version, next_id, services: {name: [Todo]}}` with
+  `Todo = {id, text, done, created_at, done_at}` (RFC 3339 UTC). Ids are
+  global and never reused.
+- Loaded once at startup into memory. Every write is serialised behind a
+  mutex, written to `todos.json.tmp`, fsynced and renamed over the file, and
+  only then committed to the cache.
+- If the directory is not writable the app still starts; writes return
+  `503 unavailable` with the reason and the UI shows it. A file that cannot be
+  parsed is never overwritten: every TODO request fails until it is fixed.
+- **Bounds:** 200 items per service, 500 characters per item, text is trimmed
+  and must be non-empty and free of control characters.
+- Writes are POST + same-origin check and refused under `CUTHULU_READ_ONLY`
+  (the UI still lists items, without edit controls).
+
 ## Self-awareness
 
 Cuthulu marks its own container `is_self` when the container carries the
@@ -214,6 +245,7 @@ allowed after a confirmation.
 | `CUTHULU_READ_ONLY`      | `false`                        | Refuse start/stop/restart, hide the buttons |
 | `CUTHULU_LOG_TAIL`       | `500`                          | History lines per log view (max 10 000) |
 | `CUTHULU_RECONCILE_SECS` | `60`                           | Full re-list interval |
+| `CUTHULU_DATA_DIR`       | `./data` (image: `/data`)      | Directory for `todos.json`; created on first write |
 | `RUST_LOG`               | `info`                         | Tracing filter |
 
 Planned: `CUTHULU_AUTH_TOKEN` (phase 5).
@@ -231,5 +263,6 @@ to the host**. Therefore:
 - Strict CSP (`default-src 'self'`, no inline script), `X-Frame-Options: DENY`,
   `nosniff`, `no-referrer`.
 - `CUTHULU_READ_ONLY=true` for a pure viewer.
+- TODO text is user input: rendered with `textContent` only, length-bounded.
 - Env var values never leave the Docker provider.
 - The image runs as a non-root user (65532) from `scratch`.

@@ -258,6 +258,31 @@ ul.plain { margin: 4px 0 0; padding-left: 2ch; list-style: none; }
 .log.show-ts .ts { display: inline; }
 .log .ln.hide { display: none; }
 
+/* ── service todos ───────────────────────────────────────── */
+
+.todos { margin: 0 0 12px; padding-top: 8px; border-top: 1px solid var(--border); }
+.todo-head { margin-bottom: 4px; font-weight: 700; }
+.todo-head .muted { font-weight: 400; }
+
+.todo-list { list-style: none; margin: 0 0 6px; padding: 0; max-height: 40vh; overflow: auto; }
+.todo { display: flex; align-items: baseline; gap: 1ch; padding: 1px 0; }
+.todo:hover { background: var(--hover); }
+.todo-check { flex: none; padding: 0; font: inherit; color: var(--muted); background: none; border: 0; }
+button.todo-check { cursor: pointer; }
+button.todo-check:hover:not(:disabled) { color: var(--accent); }
+.todo.done .todo-check { color: var(--ok); }
+.todo-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.todo.done .todo-text { color: var(--muted); text-decoration: line-through; }
+.todo-del { flex: none; padding: 0 6px; visibility: hidden; }
+.todo:hover .todo-del, .todo:focus-within .todo-del { visibility: visible; }
+.todo-form { display: flex; gap: 6px; }
+.todo-form .input { flex: 1; min-width: 0; }
+#todo-error { margin-top: 4px; }
+
+@media (hover: none) {
+  .todo-del { visibility: visible; }
+}
+
 /* ── misc ────────────────────────────────────────────────── */
 
 .foot {

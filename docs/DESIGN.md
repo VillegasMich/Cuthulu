@@ -100,6 +100,12 @@ stores an explicit choice in `localStorage` and sets `data-theme` on `<html>`.
   info `--ok`, debug/trace `--muted` — the keyword only, never the whole
   line. Colored spans override the stderr tint; the rest of an stderr line
   keeps it. A `color` checkbox turns all of it off (remembered).
+- TODO list (detail view, left pane, below the metadata): heading
+  `todo 2/5` (done/total, muted count), one line per item: `[ ]` / `[x]`
+  text toggle (`--muted`, `--ok` when done), the text, and a small `del`
+  button that appears on hover/focus like row actions. Done items are
+  `--muted` and struck through. An input + `add` button below; Enter adds.
+  The list scrolls past 40vh. No new color tokens.
 
 ## Keyboard shortcuts
 
