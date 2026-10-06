@@ -66,6 +66,7 @@ stores an explicit choice in `localStorage` and sets `data-theme` on `<html>`.
 ```
 
 - Top bar: logo/eye, counts, filter input, state filter, theme toggle.
+- Host panel (dashboard, above the toolbar): see below.
 - Main: sortable table. Sticky header. Row actions appear on hover/focus
   (`start` / `stop` / `restart` as small text buttons).
 - Detail view: two panes — metadata on the left (narrow), logs on the right
@@ -73,6 +74,39 @@ stores an explicit choice in `localStorage` and sets `data-theme` on `<html>`.
 - Log viewer: monospace, line numbers or timestamps toggle, stderr tinted,
   filter box, "follow" toggle that turns off automatically when the user
   scrolls up.
+
+## Host panel
+
+An htop-style block at the top of the dashboard, inside one bordered
+`--surface` box. Collapsible (header button, `m`); the state is remembered
+in `localStorage` (`cuthulu.sys.open`), as is the sort (`cuthulu.sys.mem`).
+
+```
+▾ host  my-box
+    0 [||||||      31.0%]    1 [||||        22.0%]   pid  user   cpu%▾ mem%  res  command
+    2 [||          9.5%]     3 [|||||||     40.1%]  1234  root    48.2  3.1  312M /usr/bin/…
+  Mem [||||||||||||||||||           5.8G/15.5G]
+  Swp [|                             0.1G/2.0G]
+  Load 1.12 0.98 0.80
+  Tasks 312, 1708 thr; 2 running
+  Up    3d 4h
+```
+
+- **Meters are text**: `[`, pipes, spaces, the value written over the right
+  end, `]` — fixed character widths (26ch per CPU meter), like htop. The
+  value is always shown; color is never the only signal. Meters carry
+  `role="meter"` with the value as `aria-valuetext`.
+- Pipe color by level, using the existing tokens: `--ok` below the warn
+  threshold, `--warn`, then `--err`. Thresholds: CPU 70 / 90 %, Mem 75 / 90 %,
+  Swp 50 / 80 %; the 1-minute load uses load ÷ cores at 70 / 100 %.
+  Labels and brackets are `--muted`.
+- CPU meters use enough columns to stay about four rows tall (2 columns for
+  ≤ 8 cores, up to 8); Mem/Swp span the CPU block's width. Below 600px one
+  column, and the process table drops user and res.
+- Process table: top 10, sortable by `cpu%` or `mem%` (header buttons, the
+  active one marked `▾` and `aria-sort`). Command in `--muted`, ellipsized,
+  full text in the tooltip. CPU% is per core (can exceed 100).
+- No new color tokens.
 
 ## Keyboard shortcuts
 
@@ -84,6 +118,7 @@ stores an explicit choice in `localStorage` and sets `data-theme` on `<html>`.
 | `l`        | open logs of selected service |
 | `s`        | start / stop selected (stop asks for confirmation) |
 | `r`        | restart selected |
+| `m`        | collapse / expand the host panel (dashboard) |
 | `t`        | toggle theme |
 | `Esc`      | back / close / clear filter |
 | `?`        | show shortcuts |

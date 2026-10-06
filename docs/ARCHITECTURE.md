@@ -11,8 +11,9 @@ this file in the same change when a decision moves.
                           ├── web       : HTML page shells + embedded static assets
                           ├── api       : JSON + Server-Sent Events
                           ├── registry  : in-memory view of all services
-                          └── providers
-                                └── docker ──unix socket──▶ /var/run/docker.sock
+                          ├── providers
+                          │     └── docker ──unix socket──▶ /var/run/docker.sock
+                          └── system    : host CPU/memory/processes ──▶ procfs (read-only)
 ```
 
 One process, one binary, no database. Docker is the source of truth; the
@@ -56,12 +57,16 @@ src/
     services.rs        list / detail / actions
     events.rs          SSE: registry changes
     logs.rs            SSE: log lines
+    system.rs          host snapshot + SSE stream
     guard.rs           CSRF / same-origin check for POSTs
     error.rs           ApiError → JSON { error, code }
   providers/
     mod.rs             Provider trait, ProviderError, ProviderEvent
     docker.rs          bollard-backed implementation (the only bollard user)
     lines.rs           log chunk → line splitting, timestamp parsing, ANSI stripping
+  system/
+    mod.rs             SystemMonitor: on-demand shared sampler, Snapshot, top-process selection
+    proc.rs            pure parsers for /proc/stat, meminfo, loadavg, uptime, [pid]/stat|status|cmdline, /etc/passwd
 templates/             base, index, service, not_found
 static/                app.css, app.js, theme.js, eye.svg, fonts/
 ```
@@ -150,6 +155,8 @@ services.
 | POST   | `/api/services/{id}/start\|stop\|restart` | Returns the updated service |
 | GET    | `/api/services/{id}/logs`          | SSE log stream; `?tail=` (≤ 10 000), `?follow=` |
 | GET    | `/api/events`                      | SSE registry stream |
+| GET    | `/api/system`                      | JSON host snapshot (CPU, memory, load, top processes); 503 if procfs is unreadable |
+| GET    | `/api/system/stream`               | SSE host snapshots, one per `CUTHULU_SYSTEM_SECS` |
 
 Errors: JSON `{ "error": "...", "code": "bad_request|forbidden|not_found|unavailable|internal" }`.
 
@@ -162,6 +169,11 @@ receives a fresh snapshot.
 
 `/api/services/{id}/logs`: `lines` (JSON array, lines batched in 50 ms windows,
 ≤ 500 per event), `failure` (message), `end` (the container stopped writing).
+
+`/api/system/stream`: `system` (snapshot JSON) every interval, the latest one
+replayed on connect when it is still fresh; `failure` (message) when procfs
+cannot be read — the stream stays open and recovers. Every event is a full
+snapshot, so a lagging client simply skips some (no `resync`).
 
 Every event carries non-empty `data` — browsers silently drop events whose
 data is empty.
@@ -176,6 +188,47 @@ data is empty.
   again, the client reopens the stream itself.
 - Backpressure is natural: the SSE body is only polled as fast as the client
   reads, which in turn slows the read from Docker.
+
+## Host system panel
+
+The dashboard's host panel is **not** a `Provider`: the host is not a service
+source and has no actions. `src/system/` reads procfs directly — no PTY, no
+`htop`/`ps` or any other binary, so it works in the `scratch` image.
+
+- **What is read:** `stat` (aggregate + per-core CPU ticks), `meminfo`
+  (used = `MemTotal − MemAvailable`, falling back to htop's
+  free/buffers/cache formula on old kernels), `loadavg` (load, runnable and
+  total threads), `uptime`, `sys/kernel/hostname`, and per pid `stat`
+  (utime+stime, start time) and `status` (uid, `VmRSS`). `cmdline` is read
+  only for the processes that make the top lists. Uids are named from
+  `/etc/passwd` when it is readable (read once at startup).
+- **CPU%** is a delta between two reads. A one-off `GET /api/system` with no
+  recent baseline reads twice, 250 ms apart. Per-process CPU% is relative to
+  one core like htop (its ticks over the wall-clock ticks elapsed, i.e. the
+  aggregate delta divided by the number of cores), so it can exceed 100.
+  Processes are matched across reads by pid *and* start time, so a reused
+  pid never inherits another process's ticks.
+- **Top processes:** the snapshot carries the union of the top 10 by CPU and
+  the top 10 by RSS (≤ 20 rows), so the client can sort by either without
+  another request.
+- **Robustness:** pids that vanish mid-scan, or are hidden by `hidepid`, are
+  skipped. An unreadable proc dir is an error (`503` / `failure` event), not
+  a crash.
+- **Cost:** one shared sampler task, started by the first subscriber and
+  stopped at the next tick after the last one leaves (the receiver count is
+  checked under the same lock that starts it, so no subscriber is ever left
+  without a sampler). Nobody watching = no sampling. Each tick reads two
+  small files per process; the work runs on the blocking pool.
+- **Bounded:** broadcast capacity 4; ≤ 20 processes per snapshot; command
+  lines cut at 512 bytes.
+
+> **Decision (2026-10):** host updates use a dedicated
+> `/api/system/stream` instead of a new event on `/api/events`. Every page
+> holds `/api/events` open (the detail page too), so riding on it would
+> sample whenever any tab is open. A separate stream ties the sampler's
+> lifetime to the panel: the client opens it only while the panel is
+> expanded and the tab visible. Snapshots also need different lag handling
+> (skip, not resync).
 
 ## Self-awareness
 
@@ -193,6 +246,8 @@ allowed after a confirmation.
 | `CUTHULU_READ_ONLY`      | `false`                        | Refuse start/stop/restart, hide the buttons |
 | `CUTHULU_LOG_TAIL`       | `500`                          | History lines per log view (max 10 000) |
 | `CUTHULU_RECONCILE_SECS` | `60`                           | Full re-list interval |
+| `CUTHULU_PROC_DIR`       | `/proc` (compose: `/host/proc`) | procfs the host panel reads; mount the host's read-only in a container |
+| `CUTHULU_SYSTEM_SECS`    | `2`                            | Host panel sampling interval (1–60), only while someone watches |
 | `RUST_LOG`               | `info`                         | Tracing filter |
 
 Planned: `CUTHULU_AUTH_TOKEN` (phase 5).
@@ -212,3 +267,5 @@ to the host**. Therefore:
 - `CUTHULU_READ_ONLY=true` for a pure viewer.
 - Env var values never leave the Docker provider.
 - The image runs as a non-root user (65532) from `scratch`.
+- The host's `/proc` (and optionally `/etc/passwd`) are mounted read-only;
+  the panel shows process command lines but never environments.

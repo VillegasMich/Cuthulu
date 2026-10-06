@@ -10,8 +10,13 @@ services:
       - "127.0.0.1:8686:8686" # localhost only: the socket below is root-equivalent
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      # Host panel (CPU, memory, processes): the host's procfs, read-only.
+      - /proc:/host/proc:ro
+      # Optional: resolve process uids to user names.
+      - /etc/passwd:/etc/passwd:ro
     group_add:
       - "${DOCKER_GID:?set DOCKER_GID to the gid of /var/run/docker.sock}"
     environment:
       RUST_LOG: info
+      CUTHULU_PROC_DIR: /host/proc
       # CUTHULU_READ_ONLY: "true"

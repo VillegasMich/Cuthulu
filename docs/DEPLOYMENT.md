@@ -17,10 +17,15 @@ services:
       - "127.0.0.1:8686:8686" # localhost only: the socket below is root-equivalent
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      # Host panel (CPU, memory, processes): the host's procfs, read-only.
+      - /proc:/host/proc:ro
+      # Optional: resolve process uids to user names.
+      - /etc/passwd:/etc/passwd:ro
     group_add:
       - "${DOCKER_GID:?set DOCKER_GID to the gid of /var/run/docker.sock}"
     environment:
       RUST_LOG: info
+      CUTHULU_PROC_DIR: /host/proc
       # CUTHULU_READ_ONLY: "true"
 ```
 
@@ -40,9 +45,28 @@ docker build -t cuthulu .
 docker run -d --name cuthulu --restart unless-stopped \
   -p 127.0.0.1:8686:8686 \
   -v /var/run/docker.sock:/var/run/docker.sock \
+  -v /proc:/host/proc:ro -e CUTHULU_PROC_DIR=/host/proc \
+  -v /etc/passwd:/etc/passwd:ro \
   --group-add "$(stat -c %g /var/run/docker.sock)" \
   cuthulu
 ```
+
+## Host panel
+
+The dashboard's host panel (per-core CPU, memory, swap, load, top
+processes) reads procfs directly — no `htop`, shell or other binary is
+involved, so it works in the `scratch` image. Inside a container `/proc`
+shows only the container's own processes, hence the host's procfs is
+bind-mounted read-only at `/host/proc` and `CUTHULU_PROC_DIR` points there.
+
+- Without that mount the panel still shows host-wide CPU, memory and load
+  (those files are not namespaced) but lists only Cuthulu's own process.
+- `/etc/passwd` is optional: without it processes are listed by uid. Only
+  user names are read from it.
+- If the host mounts `/proc` with `hidepid=`, processes of other users are
+  skipped; the rest of the panel is unaffected.
+- Sampling (every `CUTHULU_SYSTEM_SECS`, default 2) happens only while a
+  browser has the panel open and visible.
 
 ## The image
 

@@ -41,6 +41,12 @@ Each phase should end in something runnable. Tick items as they land.
 - [ ] Render ANSI colors in logs instead of stripping them
 - [ ] Download logs
 
+## Host panel ✓
+- [x] Read host CPU, memory, swap, load, uptime and processes from procfs (`src/system/`, no external binaries)
+- [x] `GET /api/system` + `/api/system/stream`, one shared sampler that runs only while watched
+- [x] htop-style panel above the services table: per-core meters, top processes by CPU / memory, collapsible (`m`)
+- [x] `CUTHULU_PROC_DIR`, `CUTHULU_SYSTEM_SECS`; compose mounts the host's `/proc` read-only
+
 ## Later
 - CPU / memory stats per service (on demand, only for visible rows)
 - systemd provider
