@@ -1,1 +1,3 @@
 /target
+# CUTHULU_DATA_DIR default for `cargo run`
+/data

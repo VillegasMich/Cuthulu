@@ -14,6 +14,7 @@ services:
       - /proc:/host/proc:ro
       # Only with CUTHULU_SYSTEM_PROCESSES: resolve process uids to user names.
       # - /etc/passwd:/etc/passwd:ro
+      - cuthulu-data:/data # todos.json; a named volume keeps the image's 65532 owner
     group_add:
       - "${DOCKER_GID:?set DOCKER_GID to the gid of /var/run/docker.sock}"
     environment:
@@ -21,3 +22,6 @@ services:
       CUTHULU_PROC_DIR: /host/proc
       # CUTHULU_SYSTEM_PROCESSES: "true"
       # CUTHULU_READ_ONLY: "true"
+
+volumes:
+  cuthulu-data:

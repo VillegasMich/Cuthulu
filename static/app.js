@@ -80,7 +80,8 @@ const svcUrl = (id) => `/services/${encodeURIComponent(id)}`;
 
 function typing(e) {
   const t = e.target;
-  return t instanceof HTMLInputElement || t instanceof HTMLSelectElement || t instanceof HTMLTextAreaElement;
+  if (t instanceof HTMLInputElement) return t.type !== "checkbox" && t.type !== "radio";
+  return t instanceof HTMLSelectElement || t instanceof HTMLTextAreaElement;
 }
 
 let flashTimer;
@@ -104,6 +105,24 @@ function toggleTheme() {
   } catch (_) {
     /* storage blocked: the choice lasts for this page only */
   }
+}
+
+// ── back navigation ────────────────────────────────────────
+
+/** True when the previous history entry is a cuthulu page (Navigation API only
+ * lists same-origin entries; `Referrer-Policy: no-referrer` rules out referrer). */
+const canGoBack = () => window.navigation?.canGoBack === true;
+
+function goBack() {
+  if (canGoBack()) history.back();
+  else location.href = "/";
+}
+
+function initBack() {
+  const sync = () => document.body.classList.toggle("can-back", canGoBack());
+  sync();
+  window.addEventListener("pageshow", sync);
+  $("#back").addEventListener("click", goBack);
 }
 
 function pref(key, fallback) {
@@ -259,15 +278,14 @@ function toggleRun(s) {
 function initIndex() {
   const rows = $("#rows");
   const filter = $("#filter");
-  const stateFilter = $("#state-filter");
+  const showStopped = $("#show-stopped");
   let selected = null;
   let visible = [];
 
   const matches = (s, q) =>
     !q || [s.name, s.image, s.group].some((f) => f && f.toLowerCase().includes(q));
 
-  const matchesState = (s, want) =>
-    !want || (want === "up" ? UP.has(s.state) : !UP.has(s.state));
+  const shown = (s) => showStopped.checked || UP.has(s.state);
 
   function row(s) {
     const label = stateLabel(s);
@@ -297,12 +315,17 @@ function initIndex() {
     const q = filter.value.trim().toLowerCase();
     const all = [...store.services.values()];
     visible = all
-      .filter((s) => matches(s, q) && matchesState(s, stateFilter.value))
+      .filter((s) => matches(s, q) && shown(s))
       .sort((a, b) => RANK[a.state] - RANK[b.state] || a.name.localeCompare(b.name));
     if (selected && !visible.some((s) => s.id === selected)) selected = null;
 
     if (!visible.length) {
-      const msg = !store.loaded ? "watching…" : all.length ? "no match" : "no services found";
+      const hidden = all.filter((s) => matches(s, q) && !shown(s)).length;
+      const msg = !store.loaded
+        ? "watching…"
+        : hidden
+          ? `${hidden} stopped hidden · press a to show`
+          : all.length ? "no match" : "no services found";
       rows.replaceChildren(el("tr", { class: "placeholder" }, el("td", { colspan: "7" }, msg)));
     } else {
       rows.replaceChildren(...visible.map(row));
@@ -316,6 +339,7 @@ function initIndex() {
       " running · ",
       el("b", {}, String(all.length - up)),
       " stopped",
+      !showStopped.checked && all.length > up ? el("span", { class: "muted" }, " (hidden)") : null,
       bad ? el("span", { class: "bad" }, ` · ${bad} failing`) : null,
     );
   };
@@ -332,7 +356,11 @@ function initIndex() {
   const current = () => store.services.get(selected);
 
   filter.addEventListener("input", changed);
-  stateFilter.addEventListener("change", changed);
+  showStopped.checked = pref("index.stopped", false);
+  showStopped.addEventListener("change", () => {
+    setPref("index.stopped", showStopped.checked);
+    changed();
+  });
 
   document.addEventListener("keydown", (e) => {
     if (e.ctrlKey || e.metaKey || e.altKey) return;
@@ -354,6 +382,7 @@ function initIndex() {
       case "Enter": case "l": if (selected) location.href = svcUrl(selected); break;
       case "s": toggleRun(current()); break;
       case "r": if (current()) act(current(), "restart"); break;
+      case "a": showStopped.click(); break;
       case "Escape": selected = null; changed(); break;
     }
   });
@@ -417,6 +446,33 @@ function initService() {
     node.classList.toggle("hide", needle !== "" && !node.dataset.lc.includes(needle));
   }
 
+  /** Class list for a style span (see LogSpan in ARCHITECTURE.md). */
+  function spanClass(s) {
+    const cls = [];
+    if (s.fg != null) cls.push(`a-f${s.fg}`);
+    if (s.bg != null) cls.push(`a-b${s.bg}`, s.fg == null ? "a-on" : null);
+    if (s.bold) cls.push("a-bold");
+    if (s.dim) cls.push("a-dim");
+    if (s.italic) cls.push("a-italic");
+    if (s.underline) cls.push("a-ul");
+    if (s.level) cls.push(`lv-${s.level}`);
+    return cls.filter(Boolean).join(" ");
+  }
+
+  /** Line text with ANSI/level spans; offsets are UTF-16, as String#slice. */
+  function logText(l) {
+    if (!l.spans?.length) return l.text;
+    const frag = document.createDocumentFragment();
+    let at = 0;
+    for (const s of l.spans) {
+      if (s.start > at) frag.append(l.text.slice(at, s.start));
+      frag.append(el("span", { class: spanClass(s) }, l.text.slice(s.start, s.end)));
+      at = s.end;
+    }
+    if (at < l.text.length) frag.append(l.text.slice(at));
+    return frag;
+  }
+
   function addLines(lines) {
     const frag = document.createDocumentFragment();
     for (const l of lines) {
@@ -424,7 +480,7 @@ function initService() {
         "div",
         { class: l.stream === "stderr" ? "ln e" : "ln" },
         l.ts ? el("span", { class: "ts", title: l.ts }, fmtTs(l.ts)) : null,
-        l.text,
+        logText(l),
       );
       node.dataset.lc = l.text.toLowerCase();
       applyFilter(node);
@@ -510,6 +566,7 @@ function initService() {
   };
   bindToggle($("#log-ts"), "logs.ts", "show-ts", false);
   bindToggle($("#log-wrap"), "logs.wrap", "wrap-lines", true);
+  bindToggle($("#log-color"), "logs.color", "colors", true);
 
   document.addEventListener("keydown", (e) => {
     if (e.ctrlKey || e.metaKey || e.altKey) return;
@@ -522,7 +579,7 @@ function initService() {
       case "f": setFollow(!follow); break;
       case "s": toggleRun(service()); break;
       case "r": if (service()) act(service(), "restart"); break;
-      case "Escape": location.href = "/"; break;
+      case "Escape": goBack(); break;
     }
   });
 
@@ -740,9 +797,130 @@ function initSystem() {
   draw();
 }
 
+// ── service todos ──────────────────────────────────────────
+
+function initTodos() {
+  const id = $("#detail").dataset.id;
+  const list = $("#todo-list");
+  const count = $("#todo-count");
+  const errBox = $("#todo-error");
+  const form = $("#todo-form");
+  const input = $("#todo-text");
+  const base = `/api/services/${encodeURIComponent(id)}/todos`;
+  let todos = [];
+  let loaded = false;
+  let busy = false;
+
+  function showError(msg) {
+    errBox.textContent = msg;
+    errBox.hidden = !msg;
+  }
+
+  function item(t) {
+    const mark = t.done ? "[x]" : "[ ]";
+    const when = `added ${fmtAgo(t.created_at)}` + (t.done_at ? ` · done ${fmtAgo(t.done_at)}` : "");
+    const check = readOnly
+      ? el("span", { class: "todo-check" }, mark)
+      : el(
+          "button",
+          {
+            class: "todo-check",
+            type: "button",
+            "data-focus": `check-${t.id}`,
+            "aria-pressed": String(t.done),
+            title: t.done ? "mark open" : "mark done",
+            onclick: () => send(`${base}/${t.id}/toggle`),
+          },
+          mark,
+        );
+    return el(
+      "li",
+      { class: t.done ? "todo done" : "todo" },
+      check,
+      el("span", { class: "todo-text", title: when }, t.text),
+      readOnly
+        ? null
+        : el(
+            "button",
+            {
+              class: "btn danger todo-del",
+              type: "button",
+              title: "delete",
+              onclick: () => send(`${base}/${t.id}/delete`),
+            },
+            "del",
+          ),
+    );
+  }
+
+  function draw() {
+    // Re-rendering replaces the buttons; keep keyboard focus on the same item.
+    const focused = document.activeElement?.dataset?.focus;
+    const done = todos.filter((t) => t.done).length;
+    count.textContent = todos.length ? `${done}/${todos.length}` : "";
+    count.title = `${done} of ${todos.length} done`;
+    if (todos.length) list.replaceChildren(...todos.map(item));
+    else list.replaceChildren(el("li", { class: "todo-empty muted" }, loaded ? "nothing to do" : "…"));
+    if (focused) list.querySelector(`[data-focus="${CSS.escape(focused)}"]`)?.focus();
+  }
+
+  async function request(url, init) {
+    const res = await fetch(url, init);
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || res.statusText);
+    return body;
+  }
+
+  /** POSTs a change; the server answers with the service's full list. */
+  async function send(url, payload) {
+    if (busy) return false;
+    busy = true;
+    try {
+      const headers = { "X-Cuthulu": "1" };
+      if (payload) headers["Content-Type"] = "application/json";
+      todos = await request(url, {
+        method: "POST",
+        headers,
+        body: payload ? JSON.stringify(payload) : undefined,
+      });
+      showError("");
+      return true;
+    } catch (e) {
+      showError(`todo: ${e.message}`);
+      return false;
+    } finally {
+      busy = false;
+      draw();
+    }
+  }
+
+  form?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const text = input.value.trim();
+    if (!text) return;
+    if (await send(base, { text })) input.value = "";
+  });
+
+  draw();
+  request(base)
+    .then((t) => {
+      todos = t;
+      loaded = true;
+      draw();
+    })
+    .catch((e) => {
+      loaded = true;
+      draw();
+      showError(`todo: ${e.message}`);
+    });
+}
+
+if (page === "service") initTodos();
+
 // ── boot ───────────────────────────────────────────────────
 
 $("#theme").addEventListener("click", toggleTheme);
+initBack();
 document.addEventListener("keydown", (e) => {
   if (e.ctrlKey || e.metaKey || e.altKey || typing(e)) return;
   if (e.key === "t") toggleTheme();

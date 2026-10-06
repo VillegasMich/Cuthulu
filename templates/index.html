@@ -43,11 +43,7 @@
 <div class="toolbar">
   <input id="filter" class="input" type="search" placeholder="filter name, image, project  [/]"
          autocomplete="off" spellcheck="false" aria-label="filter services">
-  <select id="state-filter" class="input" aria-label="state filter">
-    <option value="">all states</option>
-    <option value="up">running</option>
-    <option value="down">not running</option>
-  </select>
+  <label class="check" title="show stopped services (a)"><input id="show-stopped" type="checkbox"> show stopped</label>
 </div>
 
 <table class="services">

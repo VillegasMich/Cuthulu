@@ -17,7 +17,8 @@ this file in the same change when a decision moves.
 ```
 
 One process, one binary, no database. Docker is the source of truth; the
-registry is a cache of it kept current by events.
+registry is a cache of it kept current by events. The only state Cuthulu owns
+itself (per-service TODOs) lives in one JSON file in `CUTHULU_DATA_DIR`.
 
 ## Stack
 
@@ -52,6 +53,7 @@ src/
   registry.rs          in-memory state, watch loop per provider, broadcast; MockProvider for tests
   server.rs            AppState, router, security headers; HTTP-level tests
   web.rs               askama page handlers, embedded asset handler (ETag)
+  todos.rs             per-service TODO store: JSON file, in-memory cache, atomic writes
   api/
     mod.rs             /api router
     services.rs        list / detail / actions
@@ -59,11 +61,14 @@ src/
     logs.rs            SSE: log lines
     system.rs          host snapshot + SSE stream
     guard.rs           CSRF / same-origin check for POSTs
+    todos.rs           per-service TODO list / create / toggle / delete
     error.rs           ApiError → JSON { error, code }
   providers/
     mod.rs             Provider trait, ProviderError, ProviderEvent
     docker.rs          bollard-backed implementation (the only bollard user)
-    lines.rs           log chunk → line splitting, timestamp parsing, ANSI stripping
+    lines.rs           log chunk → line splitting, timestamp parsing
+    ansi.rs            ANSI SGR → style spans, other escapes stripped
+    level.rs           level keyword detection (INFO, level=warn, …) for uncolored lines
   system/
     mod.rs             SystemMonitor: on-demand shared sampler, Snapshot, rates, addresses, top processes
     proc.rs            pure parsers for /proc/stat, meminfo, loadavg, uptime, diskstats, net/{dev,route,fib_trie,if_inet6},
@@ -158,6 +163,10 @@ services.
 | GET    | `/api/events`                      | SSE registry stream |
 | GET    | `/api/system`                      | JSON host snapshot (CPU, memory, load, network, disk I/O, opt-in top processes); 503 if procfs is unreadable |
 | GET    | `/api/system/stream`               | SSE host snapshots, one per `CUTHULU_SYSTEM_SECS` |
+| GET    | `/api/services/{id}/todos`         | The service's TODO items, oldest first |
+| POST   | `/api/services/{id}/todos`         | Add an item, body `{"text": "..."}`; returns the list |
+| POST   | `/api/services/{id}/todos/{todo_id}/toggle` | Flip done; returns the list |
+| POST   | `/api/services/{id}/todos/{todo_id}/delete` | Remove; returns the list |
 
 Errors: JSON `{ "error": "...", "code": "bad_request|forbidden|not_found|unavailable|internal" }`.
 
@@ -175,6 +184,12 @@ receives a fresh snapshot.
 replayed on connect when it is still fresh; `failure` (message) when procfs
 cannot be read — the stream stays open and recovers. Every event is a full
 snapshot, so a lagging client simply skips some (no `resync`).
+A log line is `{ts, stream, text, spans?}`. `text` is plain (escapes removed),
+so filtering works on it. `spans` is present only when part of the line is
+styled: sorted, non-overlapping `{start, end, fg?, bg?, bold?, dim?, italic?,
+underline?, level?}`. Offsets are UTF-16 code units, end exclusive — exactly
+JavaScript's `text.slice(start, end)`. `fg`/`bg` are 16-color palette indices
+(0–7 normal, 8–15 bright); `level` is `debug` | `info` | `warn` | `error`.
 
 Every event carries non-empty `data` — browsers silently drop events whose
 data is empty.
@@ -182,8 +197,20 @@ data is empty.
 ## Logs
 
 - Docker log frames are reassembled into lines per stream (stdout/stderr),
-  timestamps split off, ANSI escapes stripped. A line longer than 16 KiB is
-  emitted in pieces instead of buffered forever.
+  timestamps split off. A line longer than 16 KiB is emitted in pieces
+  instead of buffered forever.
+- ANSI SGR sequences become style spans: reset, bold, dim, italic,
+  underline, the 16 standard + bright fg/bg colors. 256-color and truecolor
+  values are mapped to the nearest of the 16, so every color comes from the
+  theme's `--ansi-*` tokens and stays readable. Other escapes (cursor
+  movement, OSC titles, charset switches) are stripped.
+- A line with no ANSI color gets its first level keyword marked: bare
+  uppercase words (`INFO`, `[WARN]`, `ERROR:`, `FATAL`, `DEBUG`, …),
+  `level=` / `lvl=` / `severity=` key-value and JSON forms (case-insensitive),
+  and the glog `I1005 …` prefix. Lowercase prose (`an error occurred`) is not
+  matched, to avoid false positives.
+- The browser builds styled lines from spans with `textContent` only and can
+  turn colors off (`color` toggle, stored in `localStorage`).
 - The browser keeps at most 5 000 lines and never lets `EventSource`
   auto-retry (that would replay history). When the container is running
   again, the client reopens the stream itself.
@@ -258,6 +285,29 @@ image.
 > (`CUTHULU_SYSTEM_PROCESSES=true` enables it). The panel is for an
 > at-a-glance view of the machine; per-process detail is noise for most
 > users and the most expensive part of a sample.
+## Service TODOs
+
+Each service has a small TODO list on its detail page.
+
+- **Keyed by service name**, not id: the name survives `docker compose up`
+  re-creating the container, the id does not. `{id}` in the URL must belong
+  to a service the registry currently knows; it is resolved to its name.
+  Items of services that disappeared stay in the file. (If a second provider
+  ever produces clashing names, the key will need a provider prefix.)
+- **Storage:** `<CUTHULU_DATA_DIR>/todos.json`,
+  `{version, next_id, services: {name: [Todo]}}` with
+  `Todo = {id, text, done, created_at, done_at}` (RFC 3339 UTC). Ids are
+  global and never reused.
+- Loaded once at startup into memory. Every write is serialised behind a
+  mutex, written to `todos.json.tmp`, fsynced and renamed over the file, and
+  only then committed to the cache.
+- If the directory is not writable the app still starts; writes return
+  `503 unavailable` with the reason and the UI shows it. A file that cannot be
+  parsed is never overwritten: every TODO request fails until it is fixed.
+- **Bounds:** 200 items per service, 500 characters per item, text is trimmed
+  and must be non-empty and free of control characters.
+- Writes are POST + same-origin check and refused under `CUTHULU_READ_ONLY`
+  (the UI still lists items, without edit controls).
 
 ## Self-awareness
 
@@ -278,6 +328,7 @@ allowed after a confirmation.
 | `CUTHULU_PROC_DIR`       | `/proc` (compose: `/host/proc`) | procfs the host panel reads; mount the host's read-only in a container |
 | `CUTHULU_SYSTEM_SECS`    | `2`                            | Host panel sampling interval (1–60), only while someone watches |
 | `CUTHULU_SYSTEM_PROCESSES` | `false`                      | Also list the top processes (by CPU / memory) in the host panel |
+| `CUTHULU_DATA_DIR`       | `./data` (image: `/data`)      | Directory for `todos.json`; created on first write |
 | `RUST_LOG`               | `info`                         | Tracing filter |
 
 Planned: `CUTHULU_AUTH_TOKEN` (phase 5).
@@ -295,6 +346,7 @@ to the host**. Therefore:
 - Strict CSP (`default-src 'self'`, no inline script), `X-Frame-Options: DENY`,
   `nosniff`, `no-referrer`.
 - `CUTHULU_READ_ONLY=true` for a pure viewer.
+- TODO text is user input: rendered with `textContent` only, length-bounded.
 - Env var values never leave the Docker provider.
 - The image runs as a non-root user (65532) from `scratch`.
 - The host's `/proc` (and optionally `/etc/passwd`) are mounted read-only;

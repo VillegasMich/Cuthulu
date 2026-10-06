@@ -1,8 +1,9 @@
 //! Turning raw log chunks into clean [`LogLine`]s: line splitting, timestamp
-//! extraction and ANSI escape removal. Provider-agnostic.
+//! extraction, ANSI styles and level highlighting. Provider-agnostic.
 
 use std::collections::VecDeque;
 
+use super::{ansi, level};
 use crate::model::{LogLine, LogStream};
 
 /// A line longer than this is emitted in pieces instead of buffered forever.
@@ -76,10 +77,12 @@ fn parse_line(stream: LogStream, raw: &[u8], timestamps: bool) -> LogLine {
         _ => (None, raw),
     };
 
+    let styled = ansi::parse(text);
     LogLine {
         ts,
         stream,
-        text: strip_ansi(text),
+        spans: level::with_level(&styled.text, styled.spans),
+        text: styled.text,
     }
 }
 
@@ -88,51 +91,10 @@ fn looks_like_timestamp(s: &str) -> bool {
     b.len() >= 20 && b[..4].iter().all(u8::is_ascii_digit) && b[4] == b'-' && b[10] == b'T'
 }
 
-/// Removes ANSI escape sequences (colors, cursor movement, OSC titles).
-#[must_use]
-pub fn strip_ansi(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-
-    while let Some(c) = chars.next() {
-        if c != '\x1b' {
-            out.push(c);
-            continue;
-        }
-        match chars.next() {
-            // CSI: ESC [ params… final byte in @..~
-            Some('[') => {
-                for c in chars.by_ref() {
-                    if ('@'..='~').contains(&c) {
-                        break;
-                    }
-                }
-            }
-            // OSC: ESC ] … terminated by BEL or ESC \
-            Some(']') => {
-                while let Some(c) = chars.next() {
-                    if c == '\x07' {
-                        break;
-                    }
-                    if c == '\x1b' && chars.peek() == Some(&'\\') {
-                        chars.next();
-                        break;
-                    }
-                }
-            }
-            // Two-byte sequences such as ESC ( B: drop the next char too.
-            Some('(' | ')') => {
-                chars.next();
-            }
-            _ => {}
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::LogLevel;
 
     fn collect(s: &mut LineSplitter, stream: LogStream, chunks: &[&str]) -> Vec<LogLine> {
         let mut out = VecDeque::new();
@@ -198,10 +160,37 @@ mod tests {
     }
 
     #[test]
-    fn strips_ansi() {
-        assert_eq!(strip_ansi("\x1b[1;31mred\x1b[0m plain"), "red plain");
-        assert_eq!(strip_ansi("\x1b]0;title\x07after"), "after");
-        assert_eq!(strip_ansi("\x1b(Bok"), "ok");
-        assert_eq!(strip_ansi("no escapes"), "no escapes");
+    fn styles_and_levels_survive_splitting() {
+        let mut s = LineSplitter::new(true);
+        let lines = collect(
+            &mut s,
+            LogStream::Stdout,
+            &[
+                "2026-10-05T18:44:01Z \x1b[3",
+                "1mred\x1b[0m x\nWARN plain\n",
+            ],
+        );
+        assert_eq!(lines[0].text, "red x");
+        assert_eq!(lines[0].spans[0].style.fg, Some(1));
+        assert_eq!((lines[0].spans[0].start, lines[0].spans[0].end), (0, 3));
+        assert_eq!(lines[1].spans[0].level, Some(LogLevel::Warn));
+    }
+
+    #[test]
+    fn json_shape() {
+        let mut s = LineSplitter::new(false);
+        let lines = collect(
+            &mut s,
+            LogStream::Stderr,
+            &["plain\n\x1b[1;91mERROR\x1b[0m!\n"],
+        );
+        assert_eq!(
+            serde_json::to_value(&lines).unwrap(),
+            serde_json::json!([
+                {"ts": null, "stream": "stderr", "text": "plain"},
+                {"ts": null, "stream": "stderr", "text": "ERROR!",
+                 "spans": [{"start": 0, "end": 5, "fg": 9, "bold": true}]},
+            ])
+        );
     }
 }

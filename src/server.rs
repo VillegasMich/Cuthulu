@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 use crate::config::Config;
 use crate::registry::Registry;
 use crate::system::SystemMonitor;
+use crate::todos::TodoStore;
 use crate::{api, web};
 
 #[derive(Clone)]
@@ -22,6 +23,8 @@ pub struct AppState {
     pub shutdown: CancellationToken,
     /// Host CPU/memory sampler for the dashboard's system panel.
     pub system: Arc<SystemMonitor>,
+    /// Per-service TODO items (`CUTHULU_DATA_DIR/todos.json`).
+    pub todos: Arc<TodoStore>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -93,6 +96,9 @@ mod tests {
             config: Arc::new(config),
             shutdown,
             system,
+            todos: Arc::new(TodoStore::open(std::path::Path::new(
+                "/nonexistent/cuthulu",
+            ))),
         });
         (app, registry)
     }
@@ -223,6 +229,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn topbar_has_icon_controls_and_dashboard_hides_stopped_toggle() {
+        let (app, _) = app_with(vec![web()], false).await;
+        let (_, _, index) = send(&app, get("/")).await;
+        assert!(index.contains(r#"id="back""#) && index.contains(r#"aria-label="back""#));
+        assert!(index.contains(r#"aria-label="toggle theme (t)""#));
+        assert!(index.contains(r#"class="ico sun""#) && index.contains(r#"class="ico moon""#));
+        assert!(index.contains(r#"id="show-stopped""#));
+        assert!(!index.contains("state-filter"));
+
+        // Every page shell gets the back arrow; only the dashboard has the toggle.
+        let (_, _, other) = send(&app, get("/nope")).await;
+        assert!(other.contains(r#"id="back""#));
+        assert!(!other.contains(r#"id="show-stopped""#));
+    }
+
+    #[tokio::test]
     async fn serves_assets_with_etag() {
         let (app, _) = app_with(vec![], false).await;
         let (status, headers, _) = send(&app, get("/static/app.css")).await;
@@ -261,6 +283,9 @@ mod tests {
             config: Arc::new(Config::default()),
             shutdown,
             system: Arc::clone(&system),
+            todos: Arc::new(TodoStore::open(std::path::Path::new(
+                "/nonexistent/cuthulu",
+            ))),
         });
         (app, system)
     }

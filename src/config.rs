@@ -27,6 +27,8 @@ pub struct Config {
     pub system_interval: Duration,
     /// Also list the busiest processes in the host panel.
     pub system_processes: bool,
+    /// Directory for state Cuthulu owns (`todos.json`).
+    pub data_dir: PathBuf,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -48,6 +50,7 @@ impl Default for Config {
             proc_dir: PathBuf::from("/proc"),
             system_interval: Duration::from_secs(2),
             system_processes: false,
+            data_dir: PathBuf::from("data"),
         }
     }
 }
@@ -126,6 +129,7 @@ impl Config {
                 d.system_processes,
                 parse_bool,
             )?,
+            data_dir: get("CUTHULU_DATA_DIR").map_or(d.data_dir, PathBuf::from),
         })
     }
 }
@@ -181,6 +185,7 @@ mod tests {
             ("CUTHULU_LOG_TAIL", "42"),
             ("CUTHULU_RECONCILE_SECS", "5"),
             ("CUTHULU_DOCKER_HOST", "tcp://10.0.0.1:2375"),
+            ("CUTHULU_DATA_DIR", "/data"),
         ])
         .unwrap();
         assert_eq!(c.bind, "0.0.0.0:9000".parse().unwrap());
@@ -188,6 +193,7 @@ mod tests {
         assert_eq!(c.log_tail, 42);
         assert_eq!(c.reconcile_interval, Duration::from_secs(5));
         assert_eq!(c.docker_host, "tcp://10.0.0.1:2375");
+        assert_eq!(c.data_dir, PathBuf::from("/data"));
     }
 
     #[test]

@@ -35,11 +35,15 @@ Each phase should end in something runnable. Tick items as they land.
 ## Phase 5 — Polish
 - [x] Keyboard shortcuts
 - [x] Search / state filter
+- [x] Hide stopped services by default (`show stopped` toggle, `a`)
+- [x] Topbar back arrow and sun/moon theme icon
 - [ ] Sortable columns
 - [ ] Group by compose project (collapsible sections)
 - [ ] Optional `CUTHULU_AUTH_TOKEN`
-- [ ] Render ANSI colors in logs instead of stripping them
+- [x] Render ANSI colors in logs instead of stripping them
+- [x] Highlight log level keywords on uncolored lines
 - [ ] Download logs
+- [x] Per-service TODO list on the detail page (`CUTHULU_DATA_DIR/todos.json`)
 
 ## Host panel ✓
 - [x] Read host CPU, memory, swap, load, uptime, network (addresses, ↓/↑ throughput) and disk I/O from procfs (`src/system/`, no external binaries)

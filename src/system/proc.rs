@@ -479,7 +479,7 @@ procs_running 3
     fn stat_old_kernel_with_four_fields() {
         let s = parse_stat("cpu 10 0 10 80\n").unwrap();
         assert_eq!((s.all.busy, s.all.total), (20, 100));
-        assert!(s.cores.is_empty());
+        assert_eq!(s.cores, []);
     }
 
     #[test]

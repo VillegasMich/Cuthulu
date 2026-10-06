@@ -125,6 +125,31 @@ body.alert .eye .pupil { fill: var(--err); }
 
 .tag { padding: 0 6px; border: 1px solid var(--warn); color: var(--warn); border-radius: 2px; }
 
+/* icon buttons (back, theme): same box as a text .btn, hand-drawn stroke icons */
+.btn.icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: calc(1.45em + 6px);
+  min-width: calc(1.45em + 6px);
+  padding: 0 5px;
+  color: var(--muted);
+}
+.btn.icon:hover:not(:disabled) { color: var(--text); }
+.ico { display: block; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
+/* back: invisible (but keeps its slot) on the dashboard unless there is history */
+body[data-page="index"]:not(.can-back) #back { visibility: hidden; }
+
+/* theme: sun in light, moon in dark; mirrors the token rules above */
+#theme .moon { display: none; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) #theme .sun { display: none; }
+  :root:not([data-theme="light"]) #theme .moon { display: block; }
+}
+:root[data-theme="dark"] #theme .sun { display: none; }
+:root[data-theme="dark"] #theme .moon { display: block; }
+
 /* ── controls ────────────────────────────────────────────── */
 
 .btn, .input {
@@ -334,6 +359,31 @@ ul.plain { margin: 4px 0 0; padding-left: 2ch; list-style: none; }
   .procs .p-user, .procs .p-res { display: none; }
 }
 
+/* ── service todos ───────────────────────────────────────── */
+
+.todos { margin: 0 0 12px; padding-top: 8px; border-top: 1px solid var(--border); }
+.todo-head { margin-bottom: 4px; font-weight: 700; }
+.todo-head .muted { font-weight: 400; }
+
+.todo-list { list-style: none; margin: 0 0 6px; padding: 0; max-height: 40vh; overflow: auto; }
+.todo { display: flex; align-items: baseline; gap: 1ch; padding: 1px 0; }
+.todo:hover { background: var(--hover); }
+.todo-check { flex: none; padding: 0; font: inherit; color: var(--muted); background: none; border: 0; }
+button.todo-check { cursor: pointer; }
+button.todo-check:hover:not(:disabled) { color: var(--accent); }
+.todo.done .todo-check { color: var(--ok); }
+.todo-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.todo.done .todo-text { color: var(--muted); text-decoration: line-through; }
+.todo-del { flex: none; padding: 0 6px; visibility: hidden; }
+.todo:hover .todo-del, .todo:focus-within .todo-del { visibility: visible; }
+.todo-form { display: flex; gap: 6px; }
+.todo-form .input { flex: 1; min-width: 0; }
+#todo-error { margin-top: 4px; }
+
+@media (hover: none) {
+  .todo-del { visibility: visible; }
+}
+
 /* ── misc ────────────────────────────────────────────────── */
 
 .foot {
@@ -376,3 +426,107 @@ ul.plain { margin: 4px 0 0; padding-left: 2ch; list-style: none; }
   .c-group, .c-ports, .c-image { display: none; }
 }
 .services td a { color: inherit; }
+
+/* ── log colors: ANSI palette (SGR 30–37 / 90–97) and level keywords ── */
+
+:root {
+  --ansi-black: #1c1e1c;
+  --ansi-red: #c62828;
+  --ansi-green: #2e7d32;
+  --ansi-yellow: #9a6b00;
+  --ansi-blue: #1f5fa8;
+  --ansi-magenta: #8e3a8e;
+  --ansi-cyan: #00727a;
+  --ansi-white: #6b706b;
+  --ansi-bright-black: #5c615c;
+  --ansi-bright-red: #b3261e;
+  --ansi-bright-green: #1b6e20;
+  --ansi-bright-yellow: #7d5700;
+  --ansi-bright-blue: #174f8f;
+  --ansi-bright-magenta: #7a2e7a;
+  --ansi-bright-cyan: #005e64;
+  --ansi-bright-white: #4a4e4a;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ansi-black: #5a615b;
+    --ansi-red: #e5534b;
+    --ansi-green: #5fb85f;
+    --ansi-yellow: #d4a72c;
+    --ansi-blue: #5f9bd8;
+    --ansi-magenta: #b781c6;
+    --ansi-cyan: #4fb0b0;
+    --ansi-white: #b8bcb6;
+    --ansi-bright-black: #7d847e;
+    --ansi-bright-red: #f07c74;
+    --ansi-bright-green: #7fd962;
+    --ansi-bright-yellow: #e8c35a;
+    --ansi-bright-blue: #8ab6eb;
+    --ansi-bright-magenta: #d0a0de;
+    --ansi-bright-cyan: #72cfcf;
+    --ansi-bright-white: #eceee9;
+  }
+}
+
+:root[data-theme="dark"] {
+  --ansi-black: #5a615b;
+  --ansi-red: #e5534b;
+  --ansi-green: #5fb85f;
+  --ansi-yellow: #d4a72c;
+  --ansi-blue: #5f9bd8;
+  --ansi-magenta: #b781c6;
+  --ansi-cyan: #4fb0b0;
+  --ansi-white: #b8bcb6;
+  --ansi-bright-black: #7d847e;
+  --ansi-bright-red: #f07c74;
+  --ansi-bright-green: #7fd962;
+  --ansi-bright-yellow: #e8c35a;
+  --ansi-bright-blue: #8ab6eb;
+  --ansi-bright-magenta: #d0a0de;
+  --ansi-bright-cyan: #72cfcf;
+  --ansi-bright-white: #eceee9;
+}
+
+.log.colors .a-f0 { color: var(--ansi-black); }
+.log.colors .a-f1 { color: var(--ansi-red); }
+.log.colors .a-f2 { color: var(--ansi-green); }
+.log.colors .a-f3 { color: var(--ansi-yellow); }
+.log.colors .a-f4 { color: var(--ansi-blue); }
+.log.colors .a-f5 { color: var(--ansi-magenta); }
+.log.colors .a-f6 { color: var(--ansi-cyan); }
+.log.colors .a-f7 { color: var(--ansi-white); }
+.log.colors .a-f8 { color: var(--ansi-bright-black); }
+.log.colors .a-f9 { color: var(--ansi-bright-red); }
+.log.colors .a-f10 { color: var(--ansi-bright-green); }
+.log.colors .a-f11 { color: var(--ansi-bright-yellow); }
+.log.colors .a-f12 { color: var(--ansi-bright-blue); }
+.log.colors .a-f13 { color: var(--ansi-bright-magenta); }
+.log.colors .a-f14 { color: var(--ansi-bright-cyan); }
+.log.colors .a-f15 { color: var(--ansi-bright-white); }
+.log.colors .a-b0 { background: var(--ansi-black); }
+.log.colors .a-b1 { background: var(--ansi-red); }
+.log.colors .a-b2 { background: var(--ansi-green); }
+.log.colors .a-b3 { background: var(--ansi-yellow); }
+.log.colors .a-b4 { background: var(--ansi-blue); }
+.log.colors .a-b5 { background: var(--ansi-magenta); }
+.log.colors .a-b6 { background: var(--ansi-cyan); }
+.log.colors .a-b7 { background: var(--ansi-white); }
+.log.colors .a-b8 { background: var(--ansi-bright-black); }
+.log.colors .a-b9 { background: var(--ansi-bright-red); }
+.log.colors .a-b10 { background: var(--ansi-bright-green); }
+.log.colors .a-b11 { background: var(--ansi-bright-yellow); }
+.log.colors .a-b12 { background: var(--ansi-bright-blue); }
+.log.colors .a-b13 { background: var(--ansi-bright-magenta); }
+.log.colors .a-b14 { background: var(--ansi-bright-cyan); }
+.log.colors .a-b15 { background: var(--ansi-bright-white); }
+/* background without an explicit foreground: invert, like a badge */
+.log.colors .a-on { color: var(--bg); }
+.log.colors .a-bold { font-weight: 700; }
+.log.colors .a-dim { opacity: 0.7; }
+.log.colors .a-italic { font-style: italic; }
+.log.colors .a-ul { text-decoration: underline; }
+.log.colors .lv-debug { color: var(--muted); }
+.log.colors .lv-info { color: var(--ok); }
+.log.colors .lv-warn { color: var(--warn); }
+.log.colors .lv-error { color: var(--err); }
