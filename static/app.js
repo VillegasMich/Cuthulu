@@ -553,13 +553,25 @@ const fmtBits = (b) => `${((b * 8) / 1e6).toFixed(2)} Mbit/s`;
 const METER_GAP = 2; // ch between meter columns
 
 /**
- * One text meter, `lbl[|||||     text]`: the bar is `width` characters of
- * pipes and spaces with the value written over its right end, like htop.
+ * One text meter, `lbl[|||||||     text]`, like htop: `width` characters of
+ * pipes and spaces with the value right-aligned at the end. The bar scales
+ * to the room left of the value, and each pipe takes the color of the zone
+ * it falls in (ok below `warn`%, warn below `err`%, err above), so a fuller
+ * bar runs green → yellow → red.
  */
-function meter(label, pct, text, width, lvl) {
+function meter(label, pct, text, width, [warn, err]) {
   const p = Math.max(0, Math.min(100, pct));
-  const room = Math.max(0, width - text.length);
-  const pipes = Math.min(room, Math.round((p / 100) * width));
+  // Reserve room for the widest value ("100.0%") plus a space, so the bar's
+  // scale does not shift as the number changes width.
+  const room = Math.max(0, width - Math.max(text.length, 6) - 1);
+  const pipes = Math.round((p / 100) * room);
+  const zone = (i) => level(((i + 1) / room) * 100, warn, err);
+  const segs = [];
+  for (let i = 0; i < pipes; i++) {
+    const z = zone(i);
+    if (segs.length && segs[segs.length - 1].z === z) segs[segs.length - 1].n++;
+    else segs.push({ z, n: 1 });
+  }
   return el(
     "div",
     {
@@ -573,7 +585,7 @@ function meter(label, pct, text, width, lvl) {
     },
     el("span", { class: "lbl" }, label),
     el("span", { class: "br" }, "["),
-    el("span", { class: `fill ${lvl}` }, "|".repeat(pipes)),
+    ...segs.map((g) => el("span", { class: `fill ${g.z}` }, "|".repeat(g.n))),
     " ".repeat(width - pipes - text.length),
     el("span", { class: "val" }, text),
     el("span", { class: "br" }, "]"),
@@ -605,7 +617,7 @@ function initSystem() {
     cpus.style.gridTemplateColumns = `repeat(${Math.min(cols, n || 1)}, ${METER_W}ch)`;
     cpus.replaceChildren(
       ...s.cpus.map((pct, i) =>
-        meter(String(i).padStart(3) + " ", pct, `${pct.toFixed(1)}%`, METER_W - 6, level(pct, 70, 90)),
+        meter(String(i).padStart(3) + " ", pct, `${pct.toFixed(1)}%`, METER_W - 6, [70, 90]),
       ),
     );
 
@@ -614,7 +626,7 @@ function initSystem() {
     const wide = span * METER_W + (span - 1) * METER_GAP - 6;
     const usage = (label, u, warn, err) => {
       const pct = u.total ? (u.used / u.total) * 100 : 0;
-      return meter(label, pct, `${fmtBytes(u.used)}/${fmtBytes(u.total)}`, wide, level(pct, warn, err));
+      return meter(label, pct, `${fmtBytes(u.used)}/${fmtBytes(u.total)}`, wide, [warn, err]);
     };
     fill($("#sys-mem"), usage("Mem ", s.mem, 75, 90), usage("Swp ", s.swap, 50, 80));
 
@@ -635,8 +647,13 @@ function initSystem() {
         "  ",
         el("span", { title: `upload ${fmtBits(net.tx)}` }, `↑ ${fmtRate(net.tx)}`),
       ]]);
-      if (net.addrs.length) rows.push(["IP", net.addrs.map((a) => el("div", {}, a))]);
-      if (net.other.length) rows.push(["", net.other.map((a) => el("div", { class: "muted" }, a))]);
+      if (net.addrs.length) {
+        const addrs = net.addrs.flatMap((a) => [
+          el("span", { title: a.iface ? `on ${a.iface}` : "" }, a.ip),
+          el("span", { class: "kind", title: a.iface ? `on ${a.iface}` : "" }, a.kind),
+        ]);
+        rows.push(["IP", [el("span", { class: "addrs" }, ...addrs)]]);
+      }
     }
     if (s.disk) {
       rows.push(["Disk", [`read ${fmtRate(s.disk.read)}  write ${fmtRate(s.disk.write)}`]]);

@@ -213,7 +213,11 @@ image.
   container/VM plumbing (`docker*`, `br-*`, `veth*`, `virbr*`, `cni*`,
   `flannel*`, `cali*`, `vxlan*`) are left out. Addresses without a
   main-table route (e.g. a VPN using its own table) are listed without an
-  interface.
+  interface. Each address gets a `kind`: by interface name first
+  (`tailscale*`, `wg*`, `zt*`, `tun*`/`tap*`), then by range — private,
+  link-local and ULA are `local`; `100.64.0.0/10` is `cgnat` on the uplink
+  and `tailscale` elsewhere (Tailscale allocates from it), as is
+  `fd7a:115c:a1e0::/48`; anything else is `public`.
 - **Rates** (CPU%, network ↓/↑ and disk read/write) are deltas between two
   reads over the time between them. "Network speed" is the *current
   throughput* of the default-route interface, not a bandwidth test: that
@@ -239,7 +243,7 @@ image.
   checked under the same lock that starts it, so no subscriber is ever left
   without a sampler). Nobody watching = no sampling. Without processes a
   tick reads about ten small files; the work runs on the blocking pool.
-- **Bounded:** broadcast capacity 4; ≤ 8 addresses per list; ≤ 20
+- **Bounded:** broadcast capacity 4; ≤ 12 addresses; ≤ 20
   processes per snapshot; command lines cut at 512 bytes.
 
 > **Decision (2026-10):** host updates use a dedicated

@@ -305,6 +305,8 @@ ul.plain { margin: 4px 0 0; padding-left: 2ch; list-style: none; }
 }
 .sys-info dt { color: var(--muted); }
 .sys-info dd { margin: 0; }
+.sys-info .addrs { display: grid; grid-template-columns: max-content max-content; gap: 0 2ch; }
+.sys-info .kind { color: var(--muted); }
 
 .sys-procs { flex: 1 1 60ch; min-width: 0; }
 .procs { width: 100%; border-collapse: collapse; table-layout: fixed; }

@@ -10,7 +10,7 @@
 pub mod proc;
 
 use std::collections::HashMap;
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -28,8 +28,8 @@ use crate::config::Config;
 pub const TOP: usize = 10;
 /// Longest command line sent per process, in bytes.
 const MAX_CMD: usize = 512;
-/// Addresses sent per list (primary interface / others).
-const MAX_ADDRS: usize = 8;
+/// Addresses sent per snapshot.
+const MAX_ADDRS: usize = 12;
 /// Snapshots buffered per subscriber; older ones are skipped, never queued.
 const CAPACITY: usize = 4;
 /// Gap between the two reads of a one-off sample (rates need a delta).
@@ -91,15 +91,40 @@ pub struct Usage {
 pub struct Net {
     /// Interface of the default route.
     pub iface: Option<String>,
-    /// Addresses on `iface`: IPv4, then global IPv6.
-    pub addrs: Vec<String>,
-    /// The host's other addresses (VPNs, second NICs), as `iface addr` when
-    /// the interface is known. Container bridges are left out.
-    pub other: Vec<String>,
+    /// The host's addresses, those on `iface` first. Loopback and
+    /// container bridges are left out.
+    pub addrs: Vec<Addr>,
     /// Bytes per second received / sent on `iface`, or summed over the
     /// non-virtual interfaces when there is no default route.
     pub rx: u64,
     pub tx: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Addr {
+    pub ip: String,
+    /// `None` when no main-table route says (e.g. a VPN with its own table).
+    pub iface: Option<String>,
+    /// On the default-route interface.
+    pub primary: bool,
+    pub kind: AddrKind,
+}
+
+/// What an address is for, shown as a label next to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AddrKind {
+    /// Private LAN range (RFC 1918, link-local, IPv6 ULA).
+    Local,
+    /// Globally routable.
+    Public,
+    /// Carrier-grade NAT (100.64.0.0/10) handed out by the ISP.
+    Cgnat,
+    Tailscale,
+    Wireguard,
+    Zerotier,
+    /// Some other tunnel (`tun*`, `tap*`).
+    Vpn,
 }
 
 /// Bytes per second read from / written to the physical disks.
@@ -395,12 +420,53 @@ fn is_virtual(iface: &str) -> bool {
     VIRTUAL_IFACES.iter().any(|p| iface.starts_with(p))
 }
 
-/// The host's addresses, grouped by the interface of the default route.
+/// Labels an address from its interface name, then its range.
+fn classify(ip: IpAddr, iface: Option<&str>, primary: bool) -> AddrKind {
+    let named = [
+        ("tailscale", AddrKind::Tailscale),
+        ("wg", AddrKind::Wireguard),
+        ("zt", AddrKind::Zerotier),
+        ("tun", AddrKind::Vpn),
+        ("tap", AddrKind::Vpn),
+    ];
+    if let Some(kind) = iface.and_then(|i| named.iter().find(|(p, _)| i.starts_with(p))) {
+        return kind.1;
+    }
+    match ip {
+        IpAddr::V4(v4) => {
+            let [a, b, ..] = v4.octets();
+            if a == 100 && (64..128).contains(&b) {
+                // The shared range: an ISP's CGNAT on the uplink, otherwise
+                // almost always Tailscale (whose addresses come from it).
+                if primary {
+                    AddrKind::Cgnat
+                } else {
+                    AddrKind::Tailscale
+                }
+            } else if v4.is_private() || v4.is_link_local() {
+                AddrKind::Local
+            } else {
+                AddrKind::Public
+            }
+        }
+        IpAddr::V6(v6) => {
+            let seg = v6.segments();
+            if seg[..3] == [0xfd7a, 0x115c, 0xa1e0] {
+                AddrKind::Tailscale
+            } else if seg[0] & 0xfe00 == 0xfc00 || seg[0] & 0xffc0 == 0xfe80 {
+                AddrKind::Local
+            } else {
+                AddrKind::Public
+            }
+        }
+    }
+}
+
+/// The host's addresses and the interface of the default route.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Addrs {
     iface: Option<String>,
-    primary: Vec<String>,
-    other: Vec<String>,
+    list: Vec<Addr>,
 }
 
 fn addresses(routes: &[Route], v4: &[Ipv4Addr], v6: &[(String, Ipv6Addr)]) -> Addrs {
@@ -409,26 +475,18 @@ fn addresses(routes: &[Route], v4: &[Ipv4Addr], v6: &[(String, Ipv6Addr)]) -> Ad
         .filter(|r| r.is_default())
         .min_by_key(|r| r.metric)
         .map(|r| r.iface.clone());
-    let mut out = Addrs {
-        iface,
-        ..Addrs::default()
-    };
-    let mut place = |on: Option<&str>, ip: String| {
-        let list = match on {
-            Some(i) if is_virtual(i) => return,
-            Some(i) if Some(i) == out.iface.as_deref() => &mut out.primary,
-            Some(i) => {
-                if out.other.len() < MAX_ADDRS {
-                    out.other.push(format!("{i} {ip}"));
-                }
-                return;
-            }
-            // No main-table route (e.g. a VPN using its own table).
-            None => &mut out.other,
-        };
-        if list.len() < MAX_ADDRS {
-            list.push(ip);
+    let mut list = Vec::new();
+    let mut place = |on: Option<&str>, ip: IpAddr| {
+        if on.is_some_and(is_virtual) {
+            return;
         }
+        let primary = on.is_some() && on == iface.as_deref();
+        list.push(Addr {
+            ip: ip.to_string(),
+            iface: on.map(str::to_owned),
+            primary,
+            kind: classify(ip, on, primary),
+        });
     };
     for ip in v4.iter().filter(|ip| !ip.is_loopback()) {
         // Longest matching prefix; masks are contiguous, so bigger is longer.
@@ -437,12 +495,15 @@ fn addresses(routes: &[Route], v4: &[Ipv4Addr], v6: &[(String, Ipv6Addr)]) -> Ad
             .filter(|r| !r.is_default() && r.contains(*ip))
             .max_by_key(|r| u32::from(r.mask))
             .map(|r| r.iface.as_str());
-        place(on, ip.to_string());
+        place(on, IpAddr::V4(*ip));
     }
     for (i, ip) in v6 {
-        place(Some(i), ip.to_string());
+        place(Some(i), IpAddr::V6(*ip));
     }
-    out
+    // Primary interface first, otherwise in discovery order (IPv4 first).
+    list.sort_by_key(|a| !a.primary);
+    list.truncate(MAX_ADDRS);
+    Addrs { iface, list }
 }
 
 /// Host-wide values that need no delta.
@@ -502,8 +563,7 @@ fn build(prev: &Raw, now: &Raw, host: Host) -> Snapshot {
             rx: rate(before.0, after.0, secs),
             tx: rate(before.1, after.1, secs),
             iface: addrs.iface,
-            addrs: addrs.primary,
-            other: addrs.other,
+            addrs: addrs.list,
         }
     });
     let disk = now.disk.map(|after| {
@@ -936,11 +996,59 @@ pub(crate) mod tests {
             Some("eth9"),
             "lowest metric default route"
         );
-        assert_eq!(a.primary, ["192.168.1.57", "2a01::aa"]);
+        let got: Vec<(&str, Option<&str>, bool, AddrKind)> = a
+            .list
+            .iter()
+            .map(|a| (a.ip.as_str(), a.iface.as_deref(), a.primary, a.kind))
+            .collect();
         assert_eq!(
-            a.other,
-            ["wlan0 10.0.0.8", "100.64.0.5"],
-            "bridges and loopback left out"
+            got,
+            [
+                ("192.168.1.57", Some("eth9"), true, AddrKind::Local),
+                ("2a01::aa", Some("eth9"), true, AddrKind::Public),
+                ("10.0.0.8", Some("wlan0"), false, AddrKind::Local),
+                ("100.64.0.5", None, false, AddrKind::Tailscale),
+            ],
+            "primary first; bridges and loopback left out"
+        );
+    }
+
+    #[test]
+    fn address_kinds() {
+        let k = |ip: &str, iface: Option<&str>, primary: bool| {
+            classify(ip.parse().unwrap(), iface, primary)
+        };
+        assert_eq!(k("192.168.1.57", Some("wlp2s0"), true), AddrKind::Local);
+        assert_eq!(k("10.1.2.3", Some("eth0"), true), AddrKind::Local);
+        assert_eq!(k("172.20.0.4", Some("eth0"), true), AddrKind::Local);
+        assert_eq!(k("169.254.1.1", Some("eth0"), true), AddrKind::Local);
+        assert_eq!(k("81.2.69.160", Some("eth0"), true), AddrKind::Public);
+        assert_eq!(k("100.115.90.103", None, false), AddrKind::Tailscale);
+        assert_eq!(k("100.72.1.1", Some("ppp0"), true), AddrKind::Cgnat);
+        assert_eq!(
+            k("100.128.0.1", Some("eth0"), true),
+            AddrKind::Public,
+            "outside 100.64/10"
+        );
+        assert_eq!(k("10.8.0.2", Some("wg0"), false), AddrKind::Wireguard);
+        assert_eq!(
+            k("10.147.17.5", Some("ztabcdef"), false),
+            AddrKind::Zerotier
+        );
+        assert_eq!(k("10.8.0.6", Some("tun0"), false), AddrKind::Vpn);
+        assert_eq!(
+            k("fd7a:115c:a1e0::43a:5a67", Some("tailscale0"), false),
+            AddrKind::Tailscale
+        );
+        assert_eq!(
+            k("fd7a:115c:a1e0::1", None, false),
+            AddrKind::Tailscale,
+            "by range alone"
+        );
+        assert_eq!(k("fd12:3456::1", Some("eth0"), true), AddrKind::Local);
+        assert_eq!(
+            k("2800:e2:400:2e8::1", Some("wlp2s0"), true),
+            AddrKind::Public
         );
     }
 
@@ -966,8 +1074,16 @@ pub(crate) mod tests {
             Some("eth0"),
             "host namespace via pid 1"
         );
-        assert_eq!(net.addrs, ["192.168.1.57", "2a01:203:405:607::aa"]);
-        assert_eq!(net.other, ["100.64.0.5"]);
+        let ips: Vec<(&str, AddrKind)> =
+            net.addrs.iter().map(|a| (a.ip.as_str(), a.kind)).collect();
+        assert_eq!(
+            ips,
+            [
+                ("192.168.1.57", AddrKind::Local),
+                ("2a01:203:405:607::aa", AddrKind::Public),
+                ("100.64.0.5", AddrKind::Tailscale),
+            ]
+        );
         assert!(s.disk.is_some());
         let procs = s.procs.as_ref().unwrap();
         let init = procs.iter().find(|p| p.pid == 1).unwrap();

@@ -278,7 +278,8 @@ mod tests {
         assert_eq!(snap["mem"]["total"], 1_024_000);
         assert_eq!(snap["load"][0], 0.5);
         assert_eq!(snap["net"]["iface"], "eth0");
-        assert_eq!(snap["net"]["addrs"][0], "192.168.1.57");
+        assert_eq!(snap["net"]["addrs"][0]["ip"], "192.168.1.57");
+        assert_eq!(snap["net"]["addrs"][0]["kind"], "local");
         assert!(snap["disk"]["read"].is_u64());
         assert!(
             snap["procs"]
