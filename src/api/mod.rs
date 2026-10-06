@@ -5,6 +5,7 @@ mod events;
 mod guard;
 mod logs;
 mod services;
+mod system;
 
 use axum::Router;
 use axum::routing::{get, post};
@@ -22,6 +23,8 @@ pub fn router() -> Router<AppState> {
         .route("/services/{id}/logs", get(logs::stream))
         .route("/services/{id}/{action}", post(services::act))
         .route("/events", get(events::stream))
+        .route("/system", get(system::snapshot))
+        .route("/system/stream", get(system::stream))
 }
 
 fn parse_id(raw: &str) -> Result<ServiceId, ApiError> {

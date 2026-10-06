@@ -9,6 +9,7 @@ use cuthulu::config::Config;
 use cuthulu::providers::docker::DockerProvider;
 use cuthulu::registry::Registry;
 use cuthulu::server::{self, AppState};
+use cuthulu::system::SystemMonitor;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -74,10 +75,16 @@ async fn run() -> anyhow::Result<()> {
         listener.local_addr()?
     );
 
+    let system = SystemMonitor::new(
+        config.proc_dir.clone(),
+        config.system_interval,
+        shutdown.clone(),
+    );
     let app = server::router(AppState {
         registry,
         config: Arc::new(config),
         shutdown: shutdown.clone(),
+        system,
     });
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal(shutdown.clone()))
