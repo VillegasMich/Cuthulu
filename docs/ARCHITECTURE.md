@@ -64,7 +64,9 @@ src/
   providers/
     mod.rs             Provider trait, ProviderError, ProviderEvent
     docker.rs          bollard-backed implementation (the only bollard user)
-    lines.rs           log chunk → line splitting, timestamp parsing, ANSI stripping
+    lines.rs           log chunk → line splitting, timestamp parsing
+    ansi.rs            ANSI SGR → style spans, other escapes stripped
+    level.rs           level keyword detection (INFO, level=warn, …) for uncolored lines
 templates/             base, index, service, not_found
 static/                app.css, app.js, theme.js, eye.svg, fonts/
 ```
@@ -170,14 +172,33 @@ receives a fresh snapshot.
 `/api/services/{id}/logs`: `lines` (JSON array, lines batched in 50 ms windows,
 ≤ 500 per event), `failure` (message), `end` (the container stopped writing).
 
+A log line is `{ts, stream, text, spans?}`. `text` is plain (escapes removed),
+so filtering works on it. `spans` is present only when part of the line is
+styled: sorted, non-overlapping `{start, end, fg?, bg?, bold?, dim?, italic?,
+underline?, level?}`. Offsets are UTF-16 code units, end exclusive — exactly
+JavaScript's `text.slice(start, end)`. `fg`/`bg` are 16-color palette indices
+(0–7 normal, 8–15 bright); `level` is `debug` | `info` | `warn` | `error`.
+
 Every event carries non-empty `data` — browsers silently drop events whose
 data is empty.
 
 ## Logs
 
 - Docker log frames are reassembled into lines per stream (stdout/stderr),
-  timestamps split off, ANSI escapes stripped. A line longer than 16 KiB is
-  emitted in pieces instead of buffered forever.
+  timestamps split off. A line longer than 16 KiB is emitted in pieces
+  instead of buffered forever.
+- ANSI SGR sequences become style spans: reset, bold, dim, italic,
+  underline, the 16 standard + bright fg/bg colors. 256-color and truecolor
+  values are mapped to the nearest of the 16, so every color comes from the
+  theme's `--ansi-*` tokens and stays readable. Other escapes (cursor
+  movement, OSC titles, charset switches) are stripped.
+- A line with no ANSI color gets its first level keyword marked: bare
+  uppercase words (`INFO`, `[WARN]`, `ERROR:`, `FATAL`, `DEBUG`, …),
+  `level=` / `lvl=` / `severity=` key-value and JSON forms (case-insensitive),
+  and the glog `I1005 …` prefix. Lowercase prose (`an error occurred`) is not
+  matched, to avoid false positives.
+- The browser builds styled lines from spans with `textContent` only and can
+  turn colors off (`color` toggle, stored in `localStorage`).
 - The browser keeps at most 5 000 lines and never lets `EventSource`
   auto-retry (that would replay history). When the container is running
   again, the client reopens the stream itself.
