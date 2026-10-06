@@ -1,9 +1,10 @@
-# Run with:
+# Run the published image (pin a release with IMAGE=villegasmich/cuthulu:1.2.3):
 #   DOCKER_GID=$(stat -c %g /var/run/docker.sock) docker compose up -d
+# or build this checkout instead: add --build. See docs/DEPLOYMENT.md.
 services:
   cuthulu:
+    image: ${IMAGE:-villegasmich/cuthulu:latest}
     build: .
-    image: villegasmich/cuthulu:latest
     container_name: cuthulu
     restart: unless-stopped
     ports:
