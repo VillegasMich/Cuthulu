@@ -1,6 +1,9 @@
 [package]
-name = "services-dashboard"
+name = "cuthulu"
 version = "0.1.0"
 edition = "2024"
+description = "The eye that never sleeps: a self-hosted dashboard to monitor and control the services on your machine"
+license = "MIT"
+repository = "https://github.com/VillegasMich/cuthulu"
 
 [dependencies]
