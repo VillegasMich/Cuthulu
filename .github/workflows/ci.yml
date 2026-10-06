@@ -106,7 +106,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       # No QEMU: the Dockerfile cross-compiles arm64 on the runner (see its build stage).
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
       - name: check tag matches Cargo.toml
         if: env.PUBLISH == 'true'
         run: |
