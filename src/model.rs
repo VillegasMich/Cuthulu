@@ -237,7 +237,69 @@ pub struct LogLine {
     /// RFC 3339 timestamp as reported by the provider.
     pub ts: Option<String>,
     pub stream: LogStream,
+    /// Plain text, escape sequences removed.
     pub text: String,
+    /// Styled ranges of `text`, sorted and non-overlapping. Omitted when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub spans: Vec<LogSpan>,
+}
+
+/// A styled range of [`LogLine::text`].
+///
+/// Offsets are UTF-16 code units (JavaScript string indices), `end` exclusive,
+/// so the client can use `text.slice(start, end)` directly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LogSpan {
+    pub start: usize,
+    pub end: usize,
+    #[serde(flatten)]
+    pub style: LogStyle,
+    /// Set on the level keyword of an otherwise uncolored line.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub level: Option<LogLevel>,
+}
+
+/// Text attributes from ANSI SGR sequences.
+///
+/// Colors are indices into the 16-color palette (0–7 normal, 8–15 bright);
+/// 256-color and truecolor values are mapped to the nearest of them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[allow(clippy::struct_excessive_bools)] // independent SGR flags, not a state machine
+pub struct LogStyle {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fg: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bg: Option<u8>,
+    #[serde(skip_serializing_if = "is_false")]
+    pub bold: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    pub dim: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    pub italic: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    pub underline: bool,
+}
+
+impl LogStyle {
+    #[must_use]
+    pub fn has_color(&self) -> bool {
+        self.fg.is_some() || self.bg.is_some()
+    }
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // signature required by serde
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// Severity recognised from a level keyword such as `ERROR` or `level=warn`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogLevel {
+    Debug,
+    Info,
+    Warn,
+    Error,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -10,8 +10,12 @@ services:
       - "127.0.0.1:8686:8686" # localhost only: the socket below is root-equivalent
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - cuthulu-data:/data # todos.json; a named volume keeps the image's 65532 owner
     group_add:
       - "${DOCKER_GID:?set DOCKER_GID to the gid of /var/run/docker.sock}"
     environment:
       RUST_LOG: info
       # CUTHULU_READ_ONLY: "true"
+
+volumes:
+  cuthulu-data:

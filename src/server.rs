@@ -11,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::Config;
 use crate::registry::Registry;
+use crate::todos::TodoStore;
 use crate::{api, web};
 
 #[derive(Clone)]
@@ -19,6 +20,8 @@ pub struct AppState {
     pub config: Arc<Config>,
     /// Fires on shutdown so long-lived streams end and the server can exit.
     pub shutdown: CancellationToken,
+    /// Per-service TODO items (`CUTHULU_DATA_DIR/todos.json`).
+    pub todos: Arc<TodoStore>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -88,6 +91,9 @@ mod tests {
             registry: Arc::clone(&registry),
             config: Arc::new(config),
             shutdown,
+            todos: Arc::new(TodoStore::open(std::path::Path::new(
+                "/nonexistent/cuthulu",
+            ))),
         });
         (app, registry)
     }

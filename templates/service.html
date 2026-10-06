@@ -36,6 +36,19 @@
       {% if let Some(err) = d.error %}<dt>error</dt><dd class="err wrap">{{ err }}</dd>{% endif %}
     </dl>
 
+    <div class="todos" id="todos">
+      <div class="todo-head">todo <span id="todo-count" class="muted"></span></div>
+      <ul id="todo-list" class="todo-list" aria-label="todo items"></ul>
+      {% if !read_only %}
+      <form id="todo-form" class="todo-form" autocomplete="off">
+        <input id="todo-text" class="input" type="text" maxlength="500" placeholder="add todo"
+               spellcheck="false" aria-label="new todo">
+        <button class="btn" type="submit">add</button>
+      </form>
+      {% endif %}
+      <div id="todo-error" class="err wrap" role="alert" hidden></div>
+    </div>
+
     <details>
       <summary>env <span class="muted">({{ d.env_keys.len() }} keys, values hidden)</span></summary>
       <ul class="plain">{% for k in d.env_keys %}<li>{{ k }}</li>{% endfor %}</ul>
@@ -54,6 +67,7 @@
              autocomplete="off" spellcheck="false" aria-label="filter logs">
       <label class="check"><input id="log-ts" type="checkbox"> time</label>
       <label class="check"><input id="log-wrap" type="checkbox" checked> wrap</label>
+      <label class="check"><input id="log-color" type="checkbox" checked> color</label>
       <button id="log-follow" class="btn on" type="button" title="follow (f)">follow</button>
       <button id="log-clear" class="btn" type="button">clear</button>
       <span class="spacer"></span>

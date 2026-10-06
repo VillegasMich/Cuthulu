@@ -47,6 +47,27 @@ All colors are CSS custom properties on `:root`; themes only redefine tokens.
 | `--warn`         | `#d4a72c`  | `#9a6b00`  | restarting / starting |
 | `--err`          | `#e5534b`  | `#c62828`  | exited non-zero / unhealthy / dead |
 | `--log-stderr`   | `#e58a84`  | `#b3261e`  | stderr lines |
+| `--ansi-black`   | `#5a615b`  | `#1c1e1c`  | ANSI color 0 (SGR 30 / 40) |
+| `--ansi-red`     | `#e5534b`  | `#c62828`  | ANSI color 1 (SGR 31 / 41) |
+| `--ansi-green`   | `#5fb85f`  | `#2e7d32`  | ANSI color 2 (SGR 32 / 42) |
+| `--ansi-yellow`  | `#d4a72c`  | `#9a6b00`  | ANSI color 3 (SGR 33 / 43) |
+| `--ansi-blue`    | `#5f9bd8`  | `#1f5fa8`  | ANSI color 4 (SGR 34 / 44) |
+| `--ansi-magenta` | `#b781c6`  | `#8e3a8e`  | ANSI color 5 (SGR 35 / 45) |
+| `--ansi-cyan`    | `#4fb0b0`  | `#00727a`  | ANSI color 6 (SGR 36 / 46) |
+| `--ansi-white`   | `#b8bcb6`  | `#6b706b`  | ANSI color 7 (SGR 37 / 47) |
+| `--ansi-bright-black` | `#7d847e`  | `#5c615c`  | ANSI color 8 (SGR 90 / 100) |
+| `--ansi-bright-red` | `#f07c74`  | `#b3261e`  | ANSI color 9 (SGR 91 / 101) |
+| `--ansi-bright-green` | `#7fd962`  | `#1b6e20`  | ANSI color 10 (SGR 92 / 102) |
+| `--ansi-bright-yellow` | `#e8c35a`  | `#7d5700`  | ANSI color 11 (SGR 93 / 103) |
+| `--ansi-bright-blue` | `#8ab6eb`  | `#174f8f`  | ANSI color 12 (SGR 94 / 104) |
+| `--ansi-bright-magenta` | `#d0a0de`  | `#7a2e7a`  | ANSI color 13 (SGR 95 / 105) |
+| `--ansi-bright-cyan` | `#72cfcf`  | `#005e64`  | ANSI color 14 (SGR 96 / 106) |
+| `--ansi-bright-white` | `#eceee9`  | `#4a4e4a`  | ANSI color 15 (SGR 97 / 107) |
+
+The `--ansi-*` palette renders colors emitted by services in their logs. It
+reuses the status colors where they overlap and is tuned for contrast on
+`--bg` rather than fidelity: on the light theme "white" and "bright" colors
+are darker, so nothing turns invisible. No neon.
 
 Theme selection: follow `prefers-color-scheme` by default; a toggle (`t`)
 stores an explicit choice in `localStorage` and sets `data-theme` on `<html>`.
@@ -81,7 +102,19 @@ stores an explicit choice in `localStorage` and sets `data-theme` on `<html>`.
   (wide). On small screens they stack.
 - Log viewer: monospace, line numbers or timestamps toggle, stderr tinted,
   filter box, "follow" toggle that turns off automatically when the user
-  scrolls up.
+  scrolls up. ANSI colors from the service are rendered with the `--ansi-*`
+  palette (bold, dim, italic, underline too); a background without a
+  foreground shows text in `--bg`, like a badge. Lines without ANSI color
+  get their level keyword colored: error/fatal `--err`, warn `--warn`,
+  info `--ok`, debug/trace `--muted` — the keyword only, never the whole
+  line. Colored spans override the stderr tint; the rest of an stderr line
+  keeps it. A `color` checkbox turns all of it off (remembered).
+- TODO list (detail view, left pane, below the metadata): heading
+  `todo 2/5` (done/total, muted count), one line per item: `[ ]` / `[x]`
+  text toggle (`--muted`, `--ok` when done), the text, and a small `del`
+  button that appears on hover/focus like row actions. Done items are
+  `--muted` and struck through. An input + `add` button below; Enter adds.
+  The list scrolls past 40vh. No new color tokens.
 
 ## Icons
 

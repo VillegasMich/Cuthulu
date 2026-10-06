@@ -9,6 +9,7 @@ use cuthulu::config::Config;
 use cuthulu::providers::docker::DockerProvider;
 use cuthulu::registry::Registry;
 use cuthulu::server::{self, AppState};
+use cuthulu::todos::TodoStore;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -61,6 +62,7 @@ async fn run() -> anyhow::Result<()> {
         .with_context(|| format!("cannot use docker at {}", config.docker_host))?;
 
     let registry = Registry::new(vec![Arc::new(docker)]);
+    let todos = Arc::new(TodoStore::open(&config.data_dir));
     let shutdown = CancellationToken::new();
     let watchers = registry.spawn(config.reconcile_interval, &shutdown);
 
@@ -78,6 +80,7 @@ async fn run() -> anyhow::Result<()> {
         registry,
         config: Arc::new(config),
         shutdown: shutdown.clone(),
+        todos,
     });
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal(shutdown.clone()))

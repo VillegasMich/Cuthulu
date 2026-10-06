@@ -14,15 +14,21 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo build --release --locked \
  && cp target/release/cuthulu /cuthulu
+# `scratch` has no mkdir: prepare the data dir here, owned by the runtime user.
+RUN mkdir -p /out/data
 
 # ── runtime: just the binary ─────────────────────────────────
 FROM scratch
 COPY --from=build /cuthulu /cuthulu
+COPY --from=build --chown=65532:65532 /out/ /
 
 # Non-root. Access to the Docker socket is granted with --group-add.
 USER 65532:65532
 ENV CUTHULU_BIND=0.0.0.0:8686 \
+    CUTHULU_DATA_DIR=/data \
     RUST_LOG=info
+# Cuthulu's own state (todos.json). A named volume inherits the 65532 owner.
+VOLUME /data
 EXPOSE 8686
 LABEL org.opencontainers.image.title="cuthulu" \
       org.opencontainers.image.description="The eye that never sleeps: dashboard for the Docker services on your machine" \

@@ -1,7 +1,9 @@
 //! Sources of services. Every backend (Docker today, systemd later) implements
 //! [`Provider`]; nothing outside this module knows which one it talks to.
 
+pub mod ansi;
 pub mod docker;
+pub mod level;
 pub mod lines;
 
 use async_trait::async_trait;
