@@ -625,6 +625,6 @@ pub(crate) mod tests {
     #[test]
     fn host_name_prefers_the_setting() {
         assert_eq!(host_name(Some("home")), "home");
-        assert!(!host_name(None).is_empty());
+        assert_ne!(host_name(None), "");
     }
 }

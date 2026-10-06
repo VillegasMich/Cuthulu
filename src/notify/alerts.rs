@@ -453,7 +453,7 @@ mod tests {
         let alerts = t.due(c.at(630), all);
         assert_eq!(kinds(&alerts), [(AlertKind::Up, "running")]);
         assert_eq!(alerts[0].down_for, Some(Duration::from_secs(500)));
-        assert!(t.due(c.at(5000), all).is_empty());
+        assert_eq!(t.due(c.at(5000), all), Vec::<Alert>::new());
     }
 
     #[test]
@@ -467,7 +467,7 @@ mod tests {
         let mut fresh = up("web");
         fresh.id = ServiceId::new(crate::model::ProviderKind::Docker, "web2");
         t.upsert(&fresh, c.at(15));
-        assert!(t.due(c.at(100), all).is_empty());
+        assert_eq!(t.due(c.at(100), all), Vec::<Alert>::new());
         assert_eq!(t.next_due(), None);
     }
 
@@ -504,7 +504,7 @@ mod tests {
         t.due(c.at(80), all);
         t.upsert(&crashed("web"), c.at(100));
         t.upsert(&up("web"), c.at(200));
-        assert!(t.due(c.at(2000), all).is_empty());
+        assert_eq!(t.due(c.at(2000), all), Vec::<Alert>::new());
     }
 
     #[test]
@@ -512,13 +512,13 @@ mod tests {
         let (mut t, c) = setup();
         t.upsert(&up("web"), c.at(0));
         t.upsert(&crashed("web"), c.at(10));
-        assert!(t.due(c.at(100), |_| false).is_empty());
+        assert_eq!(t.due(c.at(100), |_| false), Vec::<Alert>::new());
         // Watching it now does not report the outage already under way...
-        assert!(t.due(c.at(200), all).is_empty());
+        assert_eq!(t.due(c.at(200), all), Vec::<Alert>::new());
         assert_eq!(t.next_due(), None);
         // ...nor its end, but the next one.
         t.upsert(&up("web"), c.at(300));
-        assert!(t.due(c.at(400), all).is_empty());
+        assert_eq!(t.due(c.at(400), all), Vec::<Alert>::new());
         t.upsert(&crashed("web"), c.at(500));
         assert_eq!(t.due(c.at(530), all).len(), 1);
     }
@@ -527,9 +527,9 @@ mod tests {
     fn first_seen_down_is_silent() {
         let (mut t, c) = setup();
         t.upsert(&crashed("old"), c.at(0));
-        assert!(t.due(c.at(100), all).is_empty());
+        assert_eq!(t.due(c.at(100), all), Vec::<Alert>::new());
         t.upsert(&up("old"), c.at(200));
-        assert!(t.due(c.at(300), all).is_empty());
+        assert_eq!(t.due(c.at(300), all), Vec::<Alert>::new());
     }
 
     #[test]
@@ -586,7 +586,7 @@ mod tests {
         assert_eq!(t.started_elsewhere(), ["web"]);
         // Until it goes down again.
         t.upsert(&svc("web", ServiceState::Stopped, Some(0)), c.at(300));
-        assert!(t.started_elsewhere().is_empty());
+        assert_eq!(t.started_elsewhere(), Vec::<String>::new());
     }
 
     #[test]
@@ -606,20 +606,20 @@ mod tests {
         let alerts = t.due(c.at(111), all);
         assert_eq!(kinds(&alerts), [(AlertKind::Restarted, "exited 3")]);
         assert_eq!(alerts[0].down_for, Some(Duration::from_secs(11)));
-        assert!(t.due(c.at(500), all).is_empty());
+        assert_eq!(t.due(c.at(500), all), Vec::<Alert>::new());
 
         // Again within the cooldown: counted, not mailed.
         t.upsert(&crashed("web"), c.at(600));
         t.upsert(&up("web"), c.at(605));
-        assert!(t.due(c.at(605), all).is_empty());
+        assert_eq!(t.due(c.at(605), all), Vec::<Alert>::new());
         // Unwatched: nothing either.
         t.upsert(&crashed("web"), c.at(5000));
         t.upsert(&up("web"), c.at(5005));
-        assert!(t.due(c.at(5005), |_| false).is_empty());
+        assert_eq!(t.due(c.at(5005), |_| false), Vec::<Alert>::new());
         // A clean stop that comes back quickly is a restart, not a crash.
         t.upsert(&svc("web", ServiceState::Stopped, Some(0)), c.at(9000));
         t.upsert(&up("web"), c.at(9005));
-        assert!(t.due(c.at(9100), all).is_empty());
+        assert_eq!(t.due(c.at(9100), all), Vec::<Alert>::new());
     }
 
     #[test]
