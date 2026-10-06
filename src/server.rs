@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 use crate::config::Config;
 use crate::registry::Registry;
 use crate::system::SystemMonitor;
+use crate::tailscale::Tailscale;
 use crate::todos::TodoStore;
 use crate::{api, web};
 
@@ -25,6 +26,8 @@ pub struct AppState {
     pub system: Arc<SystemMonitor>,
     /// Per-service TODO items (`CUTHULU_DATA_DIR/todos.json`).
     pub todos: Arc<TodoStore>,
+    /// Link to this machine in the Tailscale admin console.
+    pub tailscale: Arc<Tailscale>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -73,6 +76,7 @@ mod tests {
     use super::*;
     use crate::model::{ProviderKind, Service, ServiceState};
     use crate::registry::tests::{MockProvider, service};
+    use crate::tailscale::TTL;
 
     async fn app_with(services: Vec<Service>, read_only: bool) -> (Router, Arc<Registry>) {
         let provider = Arc::new(MockProvider::with(services));
@@ -99,6 +103,7 @@ mod tests {
             todos: Arc::new(TodoStore::open(std::path::Path::new(
                 "/nonexistent/cuthulu",
             ))),
+            tailscale: Arc::new(crate::tailscale::tests::disabled()),
         });
         (app, registry)
     }
@@ -298,8 +303,67 @@ mod tests {
             todos: Arc::new(TodoStore::open(std::path::Path::new(
                 "/nonexistent/cuthulu",
             ))),
+            tailscale: Arc::new(crate::tailscale::tests::disabled()),
         });
         (app, system)
+    }
+
+    fn app_with_tailscale(tailscale: Tailscale) -> Router {
+        let shutdown = CancellationToken::new();
+        router(AppState {
+            registry: Registry::new(vec![]),
+            system: SystemMonitor::new(&Config::default(), shutdown.clone()),
+            config: Arc::new(Config::default()),
+            shutdown,
+            todos: Arc::new(TodoStore::open(std::path::Path::new(
+                "/nonexistent/cuthulu",
+            ))),
+            tailscale: Arc::new(tailscale),
+        })
+    }
+
+    #[tokio::test]
+    async fn tailscale_link_hidden_when_unavailable() {
+        use crate::tailscale::tests::FakeSource;
+        for ts in [
+            crate::tailscale::tests::disabled(),
+            Tailscale::with_source(Some(FakeSource::new(None)), None, TTL),
+        ] {
+            let (status, headers, body) =
+                send(&app_with_tailscale(ts), get("/api/tailscale")).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(headers[header::CONTENT_TYPE], "application/json");
+            let link: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(link["available"], false, "{body}");
+            assert!(link["url"].is_null());
+        }
+    }
+
+    #[tokio::test]
+    async fn tailscale_link_for_this_machine() {
+        use crate::tailscale::tests::{FakeSource, STATUS};
+        let ts = Tailscale::with_source(Some(FakeSource::new(Some(STATUS))), None, TTL);
+        let (status, _, body) = send(&app_with_tailscale(ts), get("/api/tailscale")).await;
+        assert_eq!(status, StatusCode::OK);
+        let link: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            link,
+            serde_json::json!({
+                "available": true,
+                "url": "https://login.tailscale.com/admin/machines/100.115.90.103",
+                "tailnet": "someone@example.com",
+                "host": "box-lenovo.tail9cad21.ts.net",
+                "ip": "100.115.90.103",
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn pages_have_a_hidden_tailscale_button() {
+        let (app, _) = app_with(vec![], false).await;
+        let (_, _, index) = send(&app, get("/")).await;
+        assert!(index.contains(r#"id="tailscale""#), "{index}");
+        assert!(index.contains(r#"rel="noopener noreferrer""#));
     }
 
     #[tokio::test]

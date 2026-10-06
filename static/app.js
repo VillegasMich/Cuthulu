@@ -1130,10 +1130,32 @@ function initTodos() {
 
 if (page === "service") initTodos();
 
+// ── tailscale ──────────────────────────────────────────────
+
+/** Shows the topbar link to this machine in the Tailscale admin console. */
+async function initTailscale() {
+  try {
+    const res = await fetch("/api/tailscale");
+    const ts = res.ok ? await res.json() : null;
+    if (!ts?.available || !/^https?:\/\//.test(ts.url ?? "")) return;
+    const a = $("#tailscale");
+    const where = [ts.host, ts.ip && `(${ts.ip})`].filter(Boolean).join(" ");
+    const detail = [where, ts.tailnet && `on ${ts.tailnet}`].filter(Boolean).join(" ");
+    const label = detail ? `tailscale admin: ${detail}` : "tailscale admin";
+    a.href = ts.url;
+    a.title = label;
+    a.setAttribute("aria-label", label);
+    a.hidden = false;
+  } catch (_) {
+    /* no tailscale: the button stays hidden */
+  }
+}
+
 // ── boot ───────────────────────────────────────────────────
 
 $("#theme").addEventListener("click", toggleTheme);
 initBack();
+initTailscale();
 document.addEventListener("keydown", (e) => {
   if (e.ctrlKey || e.metaKey || e.altKey || typing(e)) return;
   if (e.key === "t") toggleTheme();

@@ -21,6 +21,11 @@ services:
       - /proc:/host/proc:ro
       # Only with CUTHULU_SYSTEM_PROCESSES: resolve process uids to user names.
       # - /etc/passwd:/etc/passwd:ro
+      # Optional: tailscaled's LocalAPI, for the topbar link to this machine in
+      # the Tailscale admin console. The directory, not the socket file, so a
+      # tailscaled restart (new socket) is picked up. As uid 65532 the API only
+      # allows reads; Cuthulu only calls GET /localapi/v0/status.
+      - /var/run/tailscale:/var/run/tailscale:ro
       - cuthulu-data:/data # todos.json; a named volume keeps the image's 65532 owner
     group_add:
       - "${DOCKER_GID:?set DOCKER_GID to the gid of /var/run/docker.sock}"
@@ -51,6 +56,7 @@ docker run -d --name cuthulu --restart unless-stopped \
   -p 127.0.0.1:8686:8686 \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v /proc:/host/proc:ro -e CUTHULU_PROC_DIR=/host/proc \
+  -v /var/run/tailscale:/var/run/tailscale:ro \
   -v cuthulu-data:/data \
   --group-add "$(stat -c %g /var/run/docker.sock)" \
   cuthulu
@@ -78,6 +84,30 @@ Network data is read through `/host/proc/1/net`, the host's namespace.
   browser has the panel open and visible.
 - "Network speed" is the current throughput of the default-route
   interface. Cuthulu never runs a bandwidth test or contacts the internet.
+## Tailscale (optional)
+
+If the host runs Tailscale, the topbar shows a small button that opens this
+machine in the Tailscale admin console
+(`https://login.tailscale.com/admin/machines/<its 100.x address>`). Cuthulu
+finds the address through tailscaled's local API socket, which the compose
+file mounts read-only from `/var/run/tailscale`. Without Tailscale the button
+simply does not appear (on a host without it, Docker creates an empty
+`/var/run/tailscale`; drop the mount line if you mind).
+
+- **Access:** tailscaled checks who connects. Root and the configured
+  operator get full control; anyone else — including the image's uid 65532 —
+  gets read-only access: status, preferences and whois can be read (checked
+  on tailscaled 1.102), nothing can be changed, and the profile list is
+  refused. Cuthulu calls nothing but
+  `GET /localapi/v0/status?peers=false`, and its own API only returns the
+  link, tailnet name, MagicDNS name and IPv4 of this node. Do not run the
+  container as root with this socket mounted: root gets write access.
+- `CUTHULU_TAILSCALE_SOCKET` changes the socket path; set it empty to
+  disable the lookup. `CUTHULU_TAILSCALE_URL` sets the button's URL
+  explicitly (no socket needed), e.g. for a custom admin page.
+- The lookup happens when a page loads and is cached for a minute; nothing
+  polls tailscaled.
+
 ## Data
 
 Cuthulu keeps one file of its own: `todos.json` (per-service TODOs) in

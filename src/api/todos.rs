@@ -142,6 +142,7 @@ mod tests {
             config: Arc::new(config),
             todos: Arc::new(TodoStore::open(todo_dir)),
             shutdown,
+            tailscale: Arc::new(crate::tailscale::tests::disabled()),
         })
     }
 

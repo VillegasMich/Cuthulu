@@ -110,6 +110,11 @@ stores an explicit choice in `localStorage` and sets `data-theme` on `<html>`.
     keeps its slot, so the eye never shifts between pages.
   - The theme toggle shows the *current* theme: a sun in light, a moon in dark
     (pure CSS, so it also follows `prefers-color-scheme` live).
+  - Tailscale (left of the theme toggle, only when Tailscale is available): a
+    link styled as `.btn.icon` with a three-node network glyph; opens this
+    machine in the Tailscale admin console in a new tab. The tooltip names
+    host, IP and tailnet. Hidden (not reserved) when unavailable. No brand
+    logo.
 - Host panel (dashboard, above the toolbar): see below.
 - Toolbar (dashboard): filter input and a `show stopped` checkbox. Stopped
   services are hidden by default (only `running` / `restarting` / `paused`
@@ -179,9 +184,10 @@ room. One component (`.split`, `splitter()` in `app.js`), used in three places:
 
 ## Icons
 
-Text labels win by default. The few icons (the eye, back arrow, sun/moon) are
-hand-written inline SVGs: 14px in a 24-unit viewBox, `fill: none`,
-`stroke: currentColor`, round caps/joins, no fills except the pupil. Icon
+Text labels win by default. The few icons (the eye, back arrow, sun/moon,
+the Tailscale network glyph) are hand-written inline SVGs: 14px in a
+24-unit viewBox, `fill: none`, `stroke: currentColor`, round caps/joins, no
+fills except the pupil. Icon
 buttons (`.btn.icon`) keep the box of a text `.btn`, are `--muted` until
 hover, and always carry `aria-label` + `title`.
 
