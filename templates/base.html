@@ -27,6 +27,14 @@
     <span class="spacer"></span>
     {% if read_only %}<span class="tag" title="CUTHULU_READ_ONLY is set">read-only</span>{% endif %}
     <span id="conn" class="conn" data-state="pending">docker: connecting</span>
+    <a id="tailscale" class="btn icon" href="https://login.tailscale.com/admin/machines" target="_blank" rel="noopener noreferrer" title="tailscale admin" aria-label="tailscale admin" hidden>
+      <svg class="ico" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+        <circle cx="12" cy="5" r="2.5"/>
+        <circle cx="5" cy="19" r="2.5"/>
+        <circle cx="19" cy="19" r="2.5"/>
+        <path d="M10.8 7.2 6.2 16.8M13.2 7.2l4.6 9.6M7.5 19h9"/>
+      </svg>
+    </a>
     <button id="theme" class="btn icon" type="button" title="toggle theme (t)" aria-label="toggle theme (t)">
       <svg class="ico sun" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
         <circle cx="12" cy="12" r="4"/>

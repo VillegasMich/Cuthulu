@@ -29,6 +29,10 @@ pub struct Config {
     pub system_processes: bool,
     /// Directory for state Cuthulu owns (`todos.json`).
     pub data_dir: PathBuf,
+    /// tailscaled's `LocalAPI` socket; `None` (set to empty) disables the lookup.
+    pub tailscale_socket: Option<PathBuf>,
+    /// Explicit Tailscale admin console URL for the topbar button.
+    pub tailscale_url: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -51,6 +55,8 @@ impl Default for Config {
             system_interval: Duration::from_secs(2),
             system_processes: false,
             data_dir: PathBuf::from("data"),
+            tailscale_socket: Some(PathBuf::from("/var/run/tailscale/tailscaled.sock")),
+            tailscale_url: None,
         }
     }
 }
@@ -130,6 +136,26 @@ impl Config {
                 parse_bool,
             )?,
             data_dir: get("CUTHULU_DATA_DIR").map_or(d.data_dir, PathBuf::from),
+            // Unlike the others, an empty value is meaningful here: it disables.
+            tailscale_socket: match lookup("CUTHULU_TAILSCALE_SOCKET") {
+                None => d.tailscale_socket,
+                Some(v) if v.trim().is_empty() => None,
+                Some(v) => Some(PathBuf::from(v.trim())),
+            },
+            tailscale_url: parse(
+                get("CUTHULU_TAILSCALE_URL"),
+                "CUTHULU_TAILSCALE_URL",
+                d.tailscale_url,
+                |v| {
+                    if (v.starts_with("https://") || v.starts_with("http://"))
+                        && !v.chars().any(char::is_whitespace)
+                    {
+                        Ok(Some(v.to_owned()))
+                    } else {
+                        Err("must be an http(s) URL".to_owned())
+                    }
+                },
+            )?,
         })
     }
 }
@@ -224,5 +250,31 @@ mod tests {
         assert!(from(&[("CUTHULU_SYSTEM_SECS", "0")]).is_err());
         assert!(from(&[("CUTHULU_SYSTEM_SECS", "61")]).is_err());
         assert!(from(&[("CUTHULU_SYSTEM_SECS", "x")]).is_err());
+    }
+
+    #[test]
+    fn tailscale_settings() {
+        let d = Config::default();
+        assert_eq!(
+            d.tailscale_socket.as_deref(),
+            Some(std::path::Path::new("/var/run/tailscale/tailscaled.sock"))
+        );
+        assert_eq!(d.tailscale_url, None);
+
+        let c = from(&[
+            ("CUTHULU_TAILSCALE_SOCKET", " "),
+            ("CUTHULU_TAILSCALE_URL", "https://login.tailscale.com/admin"),
+        ])
+        .unwrap();
+        assert_eq!(c.tailscale_socket, None, "empty disables");
+        assert_eq!(
+            c.tailscale_url.as_deref(),
+            Some("https://login.tailscale.com/admin")
+        );
+
+        let c = from(&[("CUTHULU_TAILSCALE_SOCKET", "/run/ts.sock")]).unwrap();
+        assert_eq!(c.tailscale_socket, Some(PathBuf::from("/run/ts.sock")));
+        assert!(from(&[("CUTHULU_TAILSCALE_URL", "javascript:alert(1)")]).is_err());
+        assert!(from(&[("CUTHULU_TAILSCALE_URL", "login.tailscale.com")]).is_err());
     }
 }

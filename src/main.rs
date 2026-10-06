@@ -10,6 +10,7 @@ use cuthulu::providers::docker::DockerProvider;
 use cuthulu::registry::Registry;
 use cuthulu::server::{self, AppState};
 use cuthulu::system::SystemMonitor;
+use cuthulu::tailscale::Tailscale;
 use cuthulu::todos::TodoStore;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -78,12 +79,14 @@ async fn run() -> anyhow::Result<()> {
     );
 
     let system = SystemMonitor::new(&config, shutdown.clone());
+    let tailscale = Arc::new(Tailscale::new(&config));
     let app = server::router(AppState {
         registry,
         config: Arc::new(config),
         shutdown: shutdown.clone(),
         system,
         todos,
+        tailscale,
     });
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal(shutdown.clone()))

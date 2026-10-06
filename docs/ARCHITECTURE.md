@@ -13,7 +13,8 @@ this file in the same change when a decision moves.
                           ├── registry  : in-memory view of all services
                           ├── providers
                           │     └── docker ──unix socket──▶ /var/run/docker.sock
-                          └── system    : host CPU/memory/network/disk ──▶ procfs (read-only)
+                          ├── system    : host CPU/memory/network/disk ──▶ procfs (read-only)
+                          └── tailscale : admin console link ──unix socket──▶ tailscaled LocalAPI (GET status only)
 ```
 
 One process, one binary, no database. Docker is the source of truth; the
@@ -61,6 +62,7 @@ src/
   server.rs            AppState, router, security headers; HTTP-level tests
   web.rs               askama page handlers, embedded asset handler (ETag)
   todos.rs             per-service TODO store: JSON file, in-memory cache, atomic writes
+  tailscale.rs         tailscaled LocalAPI status → admin console link (cached, on demand)
   api/
     mod.rs             /api router
     services.rs        list / detail / actions
@@ -69,6 +71,7 @@ src/
     system.rs          host snapshot + SSE stream
     guard.rs           CSRF / same-origin check for POSTs
     todos.rs           per-service TODO list / create / toggle / delete
+    tailscale.rs       link to this machine in the Tailscale admin console
     error.rs           ApiError → JSON { error, code }
   providers/
     mod.rs             Provider trait, ProviderError, ProviderEvent
@@ -174,6 +177,7 @@ services.
 | POST   | `/api/services/{id}/todos`         | Add an item, body `{"text": "..."}`; returns the list |
 | POST   | `/api/services/{id}/todos/{todo_id}/toggle` | Flip done; returns the list |
 | POST   | `/api/services/{id}/todos/{todo_id}/delete` | Remove; returns the list |
+| GET    | `/api/tailscale`                   | `{available, url, tailnet, host, ip}` for the topbar's Tailscale admin link; always 200 |
 
 Errors: JSON `{ "error": "...", "code": "bad_request|forbidden|not_found|unavailable|internal" }`.
 
@@ -316,6 +320,37 @@ Each service has a small TODO list on its detail page.
 - Writes are POST + same-origin check and refused under `CUTHULU_READ_ONLY`
   (the UI still lists items, without edit controls).
 
+## Tailscale admin link
+
+A topbar button opens this machine's page in the Tailscale admin console,
+`https://login.tailscale.com/admin/machines/<Tailscale IPv4>`, or the machine
+list when the node has no IPv4 yet (logged out, starting). Like the host
+panel it is **not** a `Provider`: Tailscale is not a service source.
+
+- **Source:** tailscaled's LocalAPI on its unix socket
+  (`CUTHULU_TAILSCALE_SOCKET`), `GET /localapi/v0/status?peers=false` over
+  HTTP/1.1 (hyper, no extra client). Only `Self.TailscaleIPs`,
+  `Self.DNSName` / `HostName` and `CurrentTailnet.Name` (the current
+  profile's tailnet) are deserialized; keys, peers and users never enter the
+  model. No other LocalAPI endpoint is ever called.
+- **Cost:** on demand — each page asks once — and cached for 60 s, failures
+  included; concurrent requests share one lookup. 2 s timeout, body capped at
+  256 KiB.
+- **Unavailable** (no socket, tailscaled down, empty
+  `CUTHULU_TAILSCALE_SOCKET`): `available: false` and the button stays
+  hidden. `CUTHULU_TAILSCALE_URL` overrides the link and needs no socket;
+  when the socket also answers, the tooltip still names host and tailnet.
+- **Permissions:** tailscaled gives a client that is neither root nor the
+  configured operator read-only access: `status`, `prefs` and `whois` read
+  fine, nothing can be changed, `profiles/` is refused (tailscaled 1.102).
+  The image runs as 65532, so that is all a mounted socket offers it.
+- The admin console opens in the tailnet the *browser* is signed into; if
+  that differs from the node's tailnet, Tailscale shows its own error.
+
+> **Decision (2026-10):** the link is resolved in the browser
+> (`fetch('/api/tailscale')` after load) rather than rendered into the page
+> shell, so a slow or missing tailscaled never delays a page.
+
 ## Self-awareness
 
 Cuthulu marks its own container `is_self` when the container carries the
@@ -336,6 +371,8 @@ allowed after a confirmation.
 | `CUTHULU_SYSTEM_SECS`    | `2`                            | Host panel sampling interval (1–60), only while someone watches |
 | `CUTHULU_SYSTEM_PROCESSES` | `false`                      | Also list the top processes (by CPU / memory) in the host panel |
 | `CUTHULU_DATA_DIR`       | `./data` (image: `/data`)      | Directory for `todos.json`; created on first write |
+| `CUTHULU_TAILSCALE_SOCKET` | `/var/run/tailscale/tailscaled.sock` | tailscaled LocalAPI socket for the topbar's admin console link; set empty to disable |
+| `CUTHULU_TAILSCALE_URL`  | unset                          | Explicit http(s) URL for the Tailscale button; shown even without the socket |
 | `RUST_LOG`               | `info`                         | Tracing filter |
 
 Planned: `CUTHULU_AUTH_TOKEN` (phase 5).
@@ -358,3 +395,6 @@ to the host**. Therefore:
 - The image runs as a non-root user (65532) from `scratch`.
 - The host's `/proc` (and optionally `/etc/passwd`) are mounted read-only;
   the panel shows process command lines but never environments.
+- The tailscaled socket (optional) is only used for `GET
+  /localapi/v0/status`; `/api/tailscale` returns the admin URL, tailnet name,
+  MagicDNS name and IPv4 of this node, nothing about keys or other peers.

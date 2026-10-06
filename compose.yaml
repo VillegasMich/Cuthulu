@@ -14,6 +14,11 @@ services:
       - /proc:/host/proc:ro
       # Only with CUTHULU_SYSTEM_PROCESSES: resolve process uids to user names.
       # - /etc/passwd:/etc/passwd:ro
+      # Optional: tailscaled's LocalAPI, for the topbar link to this machine in
+      # the Tailscale admin console. The directory, not the socket file, so a
+      # tailscaled restart (new socket) is picked up. As uid 65532 the API only
+      # allows reads; Cuthulu only calls GET /localapi/v0/status.
+      - /var/run/tailscale:/var/run/tailscale:ro
       - cuthulu-data:/data # todos.json; a named volume keeps the image's 65532 owner
     group_add:
       - "${DOCKER_GID:?set DOCKER_GID to the gid of /var/run/docker.sock}"

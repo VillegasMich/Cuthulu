@@ -7,5 +7,6 @@ pub mod providers;
 pub mod registry;
 pub mod server;
 pub mod system;
+pub mod tailscale;
 pub mod todos;
 mod web;
