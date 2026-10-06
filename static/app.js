@@ -76,6 +76,16 @@ function portsText(ports) {
     .join(", ");
 }
 
+/** Image reference as [repo, tag span] (`:0.2.0`, `@sha256:…`); mirrors split_image in web.rs. */
+function imageParts(image) {
+  if (!image) return [""];
+  const nameStart = image.lastIndexOf("/") + 1;
+  const colon = image.indexOf(":", nameStart);
+  const cut = Math.min(...[image.indexOf("@"), colon].filter((i) => i > 0), image.length);
+  if (cut === image.length) return [image];
+  return [image.slice(0, cut), el("span", { class: "img-tag" }, image.slice(cut))];
+}
+
 const svcUrl = (id) => `/services/${encodeURIComponent(id)}`;
 
 function typing(e) {
@@ -140,6 +150,209 @@ function setPref(key, on) {
   } catch (_) {
     /* ignore */
   }
+}
+
+// ── splitters ──────────────────────────────────────────────
+
+const rootCss = document.documentElement.style;
+
+/** Stored pane size `cuthulu.split.<key>` (theme.js applies it before first paint). */
+function splitPref(key, fallback = null) {
+  try {
+    return JSON.parse(localStorage.getItem(`cuthulu.split.${key}`)) ?? fallback;
+  } catch (_) {
+    return fallback;
+  }
+}
+
+function setSplitPref(key, value) {
+  try {
+    if (value == null) localStorage.removeItem(`cuthulu.split.${key}`);
+    else localStorage.setItem(`cuthulu.split.${key}`, JSON.stringify(value));
+  } catch (_) {
+    /* storage blocked: the size lasts for this page only */
+  }
+}
+
+/**
+ * Make `handle` (a `role="separator"`) a pane splitter: drag it with mouse,
+ * touch or pen; arrow keys step 16px or `o.step` (4× with shift); Home / End
+ * or a double-click restore the default. `o.value()` is the controlled size in px,
+ * `o.range()` its [min, max]; `o.set(px)` applies a size, `o.save(px)` stores
+ * it, `o.reset()` drops it. `o.start()`, if given, measures what `range()`
+ * needs; it runs on focus and before each drag or key press. `o.snap(px)`,
+ * if given, rounds a size to the pane's grid.
+ */
+function splitter(handle, o) {
+  const vertical = handle.getAttribute("aria-orientation") === "vertical";
+  const sync = () => {
+    o.start?.();
+    const [min, max] = o.range();
+    handle.setAttribute("aria-valuemin", String(Math.round(min)));
+    handle.setAttribute("aria-valuemax", String(Math.round(max)));
+    handle.setAttribute("aria-valuenow", String(Math.round(o.value())));
+  };
+  const resize = (px) => {
+    const [min, max] = o.range();
+    o.set(Math.round(Math.min(max, Math.max(min, o.snap ? o.snap(px) : px))));
+    handle.setAttribute("aria-valuenow", String(Math.round(o.value())));
+  };
+  const reset = () => {
+    o.reset();
+    sync();
+  };
+
+  let drag = null;
+  const pos = (e) => (vertical ? e.clientX : e.clientY);
+  handle.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    handle.setPointerCapture(e.pointerId);
+    sync();
+    drag = { at: pos(e), from: o.value(), moved: false };
+    handle.classList.add("drag");
+    document.body.dataset.resizing = vertical ? "col" : "row";
+  });
+  handle.addEventListener("pointermove", (e) => {
+    if (!drag || (!drag.moved && Math.abs(pos(e) - drag.at) < 2)) return;
+    drag.moved = true;
+    resize(drag.from + pos(e) - drag.at);
+  });
+  const stop = () => {
+    if (!drag) return;
+    if (drag.moved) o.save(o.value());
+    drag = null;
+    handle.classList.remove("drag");
+    delete document.body.dataset.resizing;
+  };
+  handle.addEventListener("pointerup", stop);
+  handle.addEventListener("lostpointercapture", stop);
+  handle.addEventListener("dblclick", reset);
+  handle.addEventListener("focus", sync);
+  handle.addEventListener("keydown", (e) => {
+    const [less, more] = vertical ? ["ArrowLeft", "ArrowRight"] : ["ArrowUp", "ArrowDown"];
+    const step = (o.step?.() ?? 16) * (e.shiftKey ? 4 : 1);
+    if (e.key === "Home" || e.key === "End") reset();
+    else if (e.key === less || e.key === more) {
+      sync();
+      resize(o.value() + (e.key === more ? step : -step));
+      o.save(o.value());
+    } else return;
+    sync();
+    // Keep the page's own arrow-key handling (row selection) out of it.
+    e.preventDefault();
+    e.stopPropagation();
+  });
+  sync();
+}
+
+/** Detail view: width of the info column (`--split-meta`). */
+function initMetaSplit() {
+  const handle = $("#split-meta");
+  const meta = $("#meta");
+  // Same bounds as the CSS clamp() on .detail.
+  splitter(handle, {
+    value: () => meta.getBoundingClientRect().width,
+    range: () => [220, Math.max(220, $("#detail").clientWidth * 0.7)],
+    set: (px) => rootCss.setProperty("--split-meta", `${px}px`),
+    save: (px) => setSplitPref("meta", px),
+    reset: () => {
+      rootCss.removeProperty("--split-meta");
+      setSplitPref("meta", null);
+    },
+  });
+}
+
+/** Dashboard: height of the host panel's body (`--split-sys`, a max-height). */
+function initSysSplit() {
+  const handle = $("#split-sys");
+  const body = $("#sys-body");
+  let natural = 0;
+  // Whole text lines below the top padding, so no row is cut in half.
+  const line = () => parseFloat(getComputedStyle(body).lineHeight) || 19;
+  const pad = () => parseFloat(getComputedStyle(body).paddingTop) || 0;
+  const measure = () => {
+    // Height with no limit: shrinking is all a limit can do.
+    const limit = rootCss.getPropertyValue("--split-sys");
+    rootCss.removeProperty("--split-sys");
+    natural = body.getBoundingClientRect().height;
+    if (limit) rootCss.setProperty("--split-sys", limit);
+  };
+  const reset = () => {
+    rootCss.removeProperty("--split-sys");
+    setSplitPref("sys", null);
+  };
+  splitter(handle, {
+    start: measure,
+    value: () => body.getBoundingClientRect().height,
+    range: () => [Math.min(pad() + 2 * line(), natural), natural],
+    step: line,
+    snap: (px) => pad() + Math.round((px - pad()) / line()) * line(),
+    set: (px) => rootCss.setProperty("--split-sys", `${px}px`),
+    // At full height, store nothing, so a taller panel later is not cut off.
+    save: (px) => (px >= natural - 1 ? reset() : setSplitPref("sys", px)),
+    reset,
+  });
+}
+
+/**
+ * Dashboard: a splitter on the right edge of each column header from state
+ * to ports. Dragging the border between two columns trades width between
+ * just those two, so nothing else moves; `name` has no width of its own and
+ * takes what the others leave. Widths are stored as % of the table.
+ */
+function initColumnSplits() {
+  const table = $(".services");
+  const cols = ["state", "name", "group", "image", "ports", "up"];
+  const th = (c) => table.querySelector(`th.c-${c}`);
+  const MIN = 56, MIN_NAME = 120;
+  const stored = () => {
+    const v = splitPref("cols", {});
+    return v && typeof v === "object" ? v : {};
+  };
+
+  cols.slice(0, -1).forEach((left, i) => {
+    const right = cols[i + 1];
+    const handle = el("span", {
+      class: "split col-split",
+      role: "separator",
+      "aria-orientation": "vertical",
+      "aria-label": `resize ${th(left).textContent} column`,
+      title: "drag to resize · double-click to reset",
+      tabindex: "0",
+    });
+    th(left).append(handle);
+    let total = 0, width = 0;
+    const setCol = (c, px) => {
+      if (c !== "name") rootCss.setProperty(`--col-${c}`, `${((px / width) * 100).toFixed(2)}%`);
+    };
+    const pct = (c) => Number(((th(c).getBoundingClientRect().width / width) * 100).toFixed(2));
+    splitter(handle, {
+      start: () => {
+        width = table.getBoundingClientRect().width;
+        total = th(left).getBoundingClientRect().width + th(right).getBoundingClientRect().width;
+      },
+      value: () => th(left).getBoundingClientRect().width,
+      range: () => [left === "name" ? MIN_NAME : MIN, total - (right === "name" ? MIN_NAME : MIN)],
+      set: (px) => {
+        setCol(left, px);
+        setCol(right, total - px);
+      },
+      save: () => {
+        const v = stored();
+        for (const c of [left, right]) if (c !== "name") v[c] = pct(c);
+        setSplitPref("cols", v);
+      },
+      reset: () => {
+        const v = stored();
+        for (const c of [left, right]) {
+          delete v[c];
+          rootCss.removeProperty(`--col-${c}`);
+        }
+        setSplitPref("cols", Object.keys(v).length ? v : null);
+      },
+    });
+  });
 }
 
 // ── live store (fed by /api/events) ────────────────────────
@@ -315,7 +528,7 @@ function initIndex() {
         s.is_self ? el("span", { class: "self" }, "(this)") : null,
       ),
       el("td", { class: "c-group", title: s.group || "" }, s.group || ""),
-      el("td", { class: "c-image", title: s.image || "" }, s.image || ""),
+      el("td", { class: "c-image", title: s.image || "" }, ...imageParts(s.image)),
       el("td", { class: "c-ports" }, portsText(s.ports)),
       el("td", { class: "c-up num" }, uptime(s)),
       el("td", { class: "c-act" }, ...actionButtons(s), bell(s)),
@@ -1241,11 +1454,33 @@ function initNotify() {
   loadNotify();
 }
 
+// ── tailscale ──────────────────────────────────────────────
+
+/** Shows the topbar link to this machine in the Tailscale admin console. */
+async function initTailscale() {
+  try {
+    const res = await fetch("/api/tailscale");
+    const ts = res.ok ? await res.json() : null;
+    if (!ts?.available || !/^https?:\/\//.test(ts.url ?? "")) return;
+    const a = $("#tailscale");
+    const where = [ts.host, ts.ip && `(${ts.ip})`].filter(Boolean).join(" ");
+    const detail = [where, ts.tailnet && `on ${ts.tailnet}`].filter(Boolean).join(" ");
+    const label = detail ? `tailscale admin: ${detail}` : "tailscale admin";
+    a.href = ts.url;
+    a.title = label;
+    a.setAttribute("aria-label", label);
+    a.hidden = false;
+  } catch (_) {
+    /* no tailscale: the button stays hidden */
+  }
+}
+
 // ── boot ───────────────────────────────────────────────────
 
 $("#theme").addEventListener("click", toggleTheme);
 initBack();
 initNotify();
+initTailscale();
 document.addEventListener("keydown", (e) => {
   if (e.ctrlKey || e.metaKey || e.altKey || typing(e)) return;
   if (e.key === "t") toggleTheme();
@@ -1254,6 +1489,9 @@ document.addEventListener("keydown", (e) => {
 
 if (page === "index") initIndex();
 if (page === "index") initSystem();
+if (page === "index") initSysSplit();
+if (page === "index") initColumnSplits();
 if (page === "service") initService();
+if (page === "service") initMetaSplit();
 connect();
 setInterval(changed, 10_000);

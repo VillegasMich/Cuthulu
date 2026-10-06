@@ -269,6 +269,8 @@ dependencies = [
  "bollard",
  "futures-util",
  "http-body-util",
+ "hyper",
+ "hyper-util",
  "lettre",
  "rust-embed",
  "serde",

@@ -146,6 +146,7 @@ mod tests {
                 ..Config::default()
             }),
             shutdown,
+            tailscale: Arc::new(crate::tailscale::tests::disabled()),
         })
     }
 

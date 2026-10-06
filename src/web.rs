@@ -38,6 +38,28 @@ impl ServicePage {
         let native = self.d.service.id.native();
         &native[..native.len().min(12)]
     }
+
+    /// The image reference split for coloring; see [`split_image`].
+    fn image_parts(&self) -> Option<(&str, &str)> {
+        self.d.service.image.as_deref().map(split_image)
+    }
+}
+
+/// Splits an image reference into repository and tag/digest, e.g.
+/// `ghcr.io:443/a/b:1.2@sha256:…` → (`ghcr.io:443/a/b`, `:1.2@sha256:…`).
+/// The tag part is empty when there is none. Mirrors `imageParts` in `app.js`.
+fn split_image(image: &str) -> (&str, &str) {
+    let name_start = image.rfind('/').map_or(0, |i| i + 1);
+    let cut = [
+        image.find('@'),
+        image[name_start..].find(':').map(|i| name_start + i),
+    ]
+    .into_iter()
+    .flatten()
+    .min()
+    .filter(|&i| i > 0)
+    .unwrap_or(image.len());
+    image.split_at(cut)
 }
 
 #[derive(Template)]
@@ -128,5 +150,81 @@ fn render(t: &impl Template) -> Response {
             tracing::error!(error = %e, "template render failed");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{PortMapping, ServiceState};
+    use crate::registry::tests::service;
+
+    #[test]
+    fn splits_image_into_repo_and_tag() {
+        assert_eq!(split_image("alpine"), ("alpine", ""));
+        assert_eq!(split_image("alpine:3.20"), ("alpine", ":3.20"));
+        assert_eq!(
+            split_image("villegasmich/tool:0.2.0"),
+            ("villegasmich/tool", ":0.2.0")
+        );
+        assert_eq!(
+            split_image("reg.local:5000/a/b"),
+            ("reg.local:5000/a/b", "")
+        );
+        assert_eq!(
+            split_image("reg.local:5000/a/b:1"),
+            ("reg.local:5000/a/b", ":1")
+        );
+        assert_eq!(split_image("a/b@sha256:abc"), ("a/b", "@sha256:abc"));
+        assert_eq!(split_image("a/b:1@sha256:abc"), ("a/b", ":1@sha256:abc"));
+        assert_eq!(split_image(":odd"), (":odd", ""));
+        assert_eq!(split_image(""), ("", ""));
+    }
+
+    #[test]
+    fn service_page_colors_tag_project_and_dims_port_host() {
+        let mut svc = service("web", ServiceState::Running);
+        svc.image = Some("nginx:1.27".into());
+        svc.group = Some("shop".into());
+        svc.ports = vec![
+            PortMapping {
+                container_port: 80,
+                protocol: "tcp".into(),
+                host_ip: Some("127.0.0.1".into()),
+                host_port: Some(8080),
+            },
+            PortMapping {
+                container_port: 53,
+                protocol: "udp".into(),
+                host_ip: None,
+                host_port: None,
+            },
+        ];
+        let page = ServicePage {
+            version: VERSION,
+            read_only: false,
+            d: ServiceDetail {
+                service: svc,
+                command: None,
+                created_at: None,
+                restart_policy: None,
+                restart_count: 0,
+                error: None,
+                mounts: vec![],
+                networks: vec![],
+                env_keys: vec![],
+                labels: std::collections::BTreeMap::new(),
+            },
+        };
+        let html = page.render().unwrap();
+        assert!(
+            html.contains(r#"nginx<span class="img-tag">:1.27</span>"#),
+            "{html}"
+        );
+        assert!(html.contains(r#"<dd class="project">shop</dd>"#));
+        assert!(html.contains(
+            r#"<span class="muted">127.0.0.1:</span>8080->80<span class="muted">/tcp</span>"#
+        ));
+        assert!(html.contains(r#"<div>53<span class="muted">/udp</span></div>"#));
     }
 }

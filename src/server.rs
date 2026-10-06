@@ -13,6 +13,7 @@ use crate::config::Config;
 use crate::notify::Notifier;
 use crate::registry::Registry;
 use crate::system::SystemMonitor;
+use crate::tailscale::Tailscale;
 use crate::todos::TodoStore;
 use crate::{api, web};
 
@@ -28,6 +29,8 @@ pub struct AppState {
     pub todos: Arc<TodoStore>,
     /// Watched services, alerts, heartbeat (`CUTHULU_DATA_DIR/notify.json`).
     pub notifier: Arc<Notifier>,
+    /// Link to this machine in the Tailscale admin console.
+    pub tailscale: Arc<Tailscale>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -76,6 +79,7 @@ mod tests {
     use super::*;
     use crate::model::{ProviderKind, Service, ServiceState};
     use crate::registry::tests::{MockProvider, service};
+    use crate::tailscale::TTL;
 
     async fn app_with(services: Vec<Service>, read_only: bool) -> (Router, Arc<Registry>) {
         let provider = Arc::new(MockProvider::with(services));
@@ -106,6 +110,7 @@ mod tests {
                 data_dir: "/nonexistent/cuthulu".into(),
                 ..Config::default()
             }),
+            tailscale: Arc::new(crate::tailscale::tests::disabled()),
         });
         (app, registry)
     }
@@ -141,6 +146,28 @@ mod tests {
         let (app, _) = app_with(vec![], false).await;
         let (status, _, body) = send(&app, get("/healthz")).await;
         assert_eq!((status, body.as_str()), (StatusCode::OK, "ok"));
+    }
+
+    #[tokio::test]
+    async fn version_endpoint_and_footer_show_the_build() {
+        let (app, _) = app_with(vec![], false).await;
+        let (status, _, body) = send(&app, get("/api/version")).await;
+        assert_eq!(status, StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            json["git_sha"].as_str(),
+            crate::build_info::git_sha(),
+            "null unless CUTHULU_BUILD_SHA was set at build time"
+        );
+
+        // Every page footer links the version to its release tag.
+        let (_, _, page) = send(&app, get("/nope")).await;
+        let link = format!(
+            r#"<a href="https://github.com/VillegasMich/cuthulu/releases/tag/v{0}" title="release notes">v{0}</a>"#,
+            env!("CARGO_PKG_VERSION")
+        );
+        assert!(page.contains(&link), "{page}");
     }
 
     #[tokio::test]
@@ -252,6 +279,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dashboard_has_host_panel_splitter() {
+        let (app, _) = app_with(vec![web()], false).await;
+        let (_, _, index) = send(&app, get("/")).await;
+        assert!(index.contains(r#"id="split-sys""#));
+        assert!(index.contains(r#"role="separator" aria-orientation="horizontal""#));
+        // Column splitters are added by app.js to these headers.
+        for col in ["c-state", "c-name", "c-group", "c-image", "c-ports", "c-up"] {
+            assert!(index.contains(&format!(r#"<th class="{col}"#)), "{col}");
+        }
+    }
+
+    #[tokio::test]
     async fn serves_assets_with_etag() {
         let (app, _) = app_with(vec![], false).await;
         let (status, headers, _) = send(&app, get("/static/app.css")).await;
@@ -297,8 +336,71 @@ mod tests {
                 data_dir: "/nonexistent/cuthulu".into(),
                 ..Config::default()
             }),
+            tailscale: Arc::new(crate::tailscale::tests::disabled()),
         });
         (app, system)
+    }
+
+    fn app_with_tailscale(tailscale: Tailscale) -> Router {
+        let shutdown = CancellationToken::new();
+        router(AppState {
+            registry: Registry::new(vec![]),
+            system: SystemMonitor::new(&Config::default(), shutdown.clone()),
+            config: Arc::new(Config::default()),
+            shutdown,
+            todos: Arc::new(TodoStore::open(std::path::Path::new(
+                "/nonexistent/cuthulu",
+            ))),
+            notifier: Notifier::new(&Config {
+                data_dir: "/nonexistent/cuthulu".into(),
+                ..Config::default()
+            }),
+            tailscale: Arc::new(tailscale),
+        })
+    }
+
+    #[tokio::test]
+    async fn tailscale_link_hidden_when_unavailable() {
+        use crate::tailscale::tests::FakeSource;
+        for ts in [
+            crate::tailscale::tests::disabled(),
+            Tailscale::with_source(Some(FakeSource::new(None)), None, TTL),
+        ] {
+            let (status, headers, body) =
+                send(&app_with_tailscale(ts), get("/api/tailscale")).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(headers[header::CONTENT_TYPE], "application/json");
+            let link: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(link["available"], false, "{body}");
+            assert!(link["url"].is_null());
+        }
+    }
+
+    #[tokio::test]
+    async fn tailscale_link_for_this_machine() {
+        use crate::tailscale::tests::{FakeSource, STATUS};
+        let ts = Tailscale::with_source(Some(FakeSource::new(Some(STATUS))), None, TTL);
+        let (status, _, body) = send(&app_with_tailscale(ts), get("/api/tailscale")).await;
+        assert_eq!(status, StatusCode::OK);
+        let link: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            link,
+            serde_json::json!({
+                "available": true,
+                "url": "https://login.tailscale.com/admin/machines/100.115.90.103",
+                "tailnet": "someone@example.com",
+                "host": "box-lenovo.tail9cad21.ts.net",
+                "ip": "100.115.90.103",
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn pages_have_a_hidden_tailscale_button() {
+        let (app, _) = app_with(vec![], false).await;
+        let (_, _, index) = send(&app, get("/")).await;
+        assert!(index.contains(r#"id="tailscale""#), "{index}");
+        assert!(index.contains(r#"rel="noopener noreferrer""#));
     }
 
     #[tokio::test]

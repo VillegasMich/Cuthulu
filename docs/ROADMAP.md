@@ -27,10 +27,12 @@ Each phase should end in something runnable. Tick items as they land.
 - [x] Confirmation for stop, self-protection (`is_self`)
 - [x] `CUTHULU_READ_ONLY`, same-origin check on POSTs
 
-## Phase 4 — Ship as a container
+## Phase 4 — Ship as a container ✓
 - [x] Multi-stage `Dockerfile` (static musl binary, `scratch`, non-root, healthcheck)
 - [x] `compose.yaml` with socket mount, `127.0.0.1` port binding, `restart: unless-stopped`
-- [ ] Publish image (`villegasmich/cuthulu`) from CI on tags
+- [x] Publish image (`villegasmich/cuthulu`, amd64 + arm64) from CI on tags
+- [x] Release workflow: Conventional Commits semver bump, GitHub release, Docker Hub push
+- [x] Version (and commit) in the footer, `GET /api/version`, OCI version/revision labels
 
 ## Phase 5 — Polish
 - [x] Keyboard shortcuts
@@ -44,6 +46,9 @@ Each phase should end in something runnable. Tick items as they land.
 - [x] Highlight log level keywords on uncolored lines
 - [ ] Download logs
 - [x] Per-service TODO list on the detail page (`CUTHULU_DATA_DIR/todos.json`)
+- [x] WCAG contrast pass (text ≥ 4.5:1, controls ≥ 3:1) and data colors (`--key`, `--project`, `--tag`)
+- [x] Resizable panes: splitters for the detail view's info column, the dashboard's table columns and host panel height (remembered per browser)
+- [x] Topbar link to this machine in the Tailscale admin console (`/api/tailscale`, tailscaled LocalAPI)
 
 ## Host panel ✓
 - [x] Read host CPU, memory, swap, load, uptime, network (addresses, ↓/↑ throughput) and disk I/O from procfs (`src/system/`, no external binaries)

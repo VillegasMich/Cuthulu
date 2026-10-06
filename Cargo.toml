@@ -16,6 +16,9 @@ async-trait = "0.1.92"
 axum = "0.8.9"
 bollard = "0.21.1"
 futures-util = "0.3.34"
+http-body-util = "0.1.5"
+hyper = { version = "1.11.1", features = ["client", "http1"] }
+hyper-util = { version = "0.1.21", features = ["tokio"] }
 lettre = { version = "0.11.23", default-features = false, features = ["smtp-transport", "builder", "tokio1-rustls-tls"] }
 rust-embed = { version = "8.12.0", features = ["mime-guess"] }
 serde = { version = "1.0.229", features = ["derive"] }
@@ -29,7 +32,6 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 ureq = { version = "3.4.2", default-features = false, features = ["rustls"] }
 
 [dev-dependencies]
-http-body-util = "0.1.5"
 tower = { version = "0.5.3", features = ["util"] }
 
 [lints.rust]

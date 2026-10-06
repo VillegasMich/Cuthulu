@@ -135,6 +135,7 @@ mod tests {
             system: SystemMonitor::new(&config, shutdown.clone()),
             todos: Arc::new(TodoStore::open(dir.path())),
             notifier: Notifier::new(&config),
+            tailscale: Arc::new(crate::tailscale::tests::disabled()),
             config: Arc::new(config),
             shutdown,
         });

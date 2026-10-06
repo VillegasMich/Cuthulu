@@ -15,6 +15,7 @@ this file in the same change when a decision moves.
                           │     └── docker ──unix socket──▶ /var/run/docker.sock
                           ├── system    : host CPU/memory/network/disk ──▶ procfs (read-only)
                           └── notify    : alerts, heartbeat ──▶ SMTP, healthcheck URL (outbound only)
+                          └── tailscale : admin console link ──unix socket──▶ tailscaled LocalAPI (GET status only)
 ```
 
 One process, one binary, no database. Docker is the source of truth; the
@@ -46,6 +47,13 @@ JSON files in `CUTHULU_DATA_DIR`.
 All frontend assets (JS, CSS, the JetBrains Mono font) live under `static/`
 and are embedded in the binary. Nothing is loaded from a CDN.
 
+UI preferences (theme, toggles, pane sizes from the splitters) are kept per
+browser in `localStorage` under `cuthulu.*` keys — never on the server. Every
+access is wrapped in `try`/`catch`, so the UI works with storage blocked.
+`static/theme.js` runs in `<head>`, before first paint, and applies the
+stored theme and pane sizes (as CSS custom properties on `<html>`), so pages
+do not flash or jump on load.
+
 ## Source layout
 
 ```
@@ -54,6 +62,7 @@ src/
   lib.rs
   config.rs            CUTHULU_* env parsing (pure, unit-tested via a lookup fn)
   envfile.rs           optional ./.env reader layered under the real environment
+  build_info.rs        version (Cargo.toml) + git commit injected at build time
   model.rs             Service, ServiceId, ServiceState, Action, LogLine, …
   registry.rs          in-memory state, watch loop per provider, broadcast; MockProvider for tests
   server.rs            AppState, router, security headers; HTTP-level tests
@@ -65,6 +74,7 @@ src/
     mail.rs            Mailer trait, SMTP (lettre), email texts
     heartbeat.rs       healthcheck pings (ureq)
     store.rs           watched services + global switch: notify.json, atomic writes
+  tailscale.rs         tailscaled LocalAPI status → admin console link (cached, on demand)
   api/
     mod.rs             /api router
     services.rs        list / detail / actions
@@ -74,6 +84,8 @@ src/
     guard.rs           CSRF / same-origin check for POSTs
     todos.rs           per-service TODO list / create / toggle / delete
     notify.rs          notification settings, watch toggle, test
+    tailscale.rs       link to this machine in the Tailscale admin console
+    version.rs         running build (version, commit)
     error.rs           ApiError → JSON { error, code }
   providers/
     mod.rs             Provider trait, ProviderError, ProviderEvent
@@ -183,6 +195,8 @@ services.
 | POST   | `/api/notify`                      | Global alert switch, body `{"enabled": bool}`; returns the state |
 | POST   | `/api/services/{id}/notify`        | Watch / unwatch, body `{"watch": bool}`; returns the state |
 | POST   | `/api/notify/test`                 | Send a test email and one ping now; `{email, healthcheck}` each `{status: sent\|off\|failed, error?}` |
+| GET    | `/api/tailscale`                   | `{available, url, tailnet, host, ip}` for the topbar's Tailscale admin link; always 200 |
+| GET    | `/api/version`                     | `{"version": "0.1.0", "git_sha": "<full sha>" \| null}` |
 
 Errors: JSON `{ "error": "...", "code": "bad_request|forbidden|not_found|unavailable|internal" }`.
 
@@ -422,6 +436,37 @@ a `CUTHULU_` prefix, same TLS rules, same heartbeat semantics).
 > would be a separate provider with its own security review. It detects and
 > explains the situation instead.
 
+## Tailscale admin link
+
+A topbar button opens this machine's page in the Tailscale admin console,
+`https://login.tailscale.com/admin/machines/<Tailscale IPv4>`, or the machine
+list when the node has no IPv4 yet (logged out, starting). Like the host
+panel it is **not** a `Provider`: Tailscale is not a service source.
+
+- **Source:** tailscaled's LocalAPI on its unix socket
+  (`CUTHULU_TAILSCALE_SOCKET`), `GET /localapi/v0/status?peers=false` over
+  HTTP/1.1 (hyper, no extra client). Only `Self.TailscaleIPs`,
+  `Self.DNSName` / `HostName` and `CurrentTailnet.Name` (the current
+  profile's tailnet) are deserialized; keys, peers and users never enter the
+  model. No other LocalAPI endpoint is ever called.
+- **Cost:** on demand — each page asks once — and cached for 60 s, failures
+  included; concurrent requests share one lookup. 2 s timeout, body capped at
+  256 KiB.
+- **Unavailable** (no socket, tailscaled down, empty
+  `CUTHULU_TAILSCALE_SOCKET`): `available: false` and the button stays
+  hidden. `CUTHULU_TAILSCALE_URL` overrides the link and needs no socket;
+  when the socket also answers, the tooltip still names host and tailnet.
+- **Permissions:** tailscaled gives a client that is neither root nor the
+  configured operator read-only access: `status`, `prefs` and `whois` read
+  fine, nothing can be changed, `profiles/` is refused (tailscaled 1.102).
+  The image runs as 65532, so that is all a mounted socket offers it.
+- The admin console opens in the tailnet the *browser* is signed into; if
+  that differs from the node's tailnet, Tailscale shows its own error.
+
+> **Decision (2026-10):** the link is resolved in the browser
+> (`fetch('/api/tailscale')` after load) rather than rendered into the page
+> shell, so a slow or missing tailscaled never delays a page.
+
 ## Self-awareness
 
 Cuthulu marks its own container `is_self` when the container carries the
@@ -465,9 +510,17 @@ context, so containers get their settings from Compose as before.
 | `CUTHULU_NOTIFY_HOST`    | host name (outside a container), else `cuthulu` | Machine name in email subjects |
 | `CUTHULU_HEALTHCHECK_URL` | —                             | Ping URL, e.g. `https://hc-ping.com/<uuid>`; secret |
 | `CUTHULU_HEALTHCHECK_INTERVAL_MINUTES` | `5`              | Ping interval (1–1440) |
+| `CUTHULU_TAILSCALE_SOCKET` | `/var/run/tailscale/tailscaled.sock` | tailscaled LocalAPI socket for the topbar's admin console link; set empty to disable |
+| `CUTHULU_TAILSCALE_URL`  | unset                          | Explicit http(s) URL for the Tailscale button; shown even without the socket |
 | `RUST_LOG`               | `info`                         | Tracing filter |
 
 Planned: `CUTHULU_AUTH_TOKEN` (phase 5).
+
+Build time, not runtime: `CUTHULU_BUILD_SHA` (set from the image's `GIT_SHA`
+build arg) is compiled in as the commit shown in the footer and
+`/api/version`; without it only the version is shown. The version is
+`Cargo.toml`'s, bumped by the release workflow
+([DEPLOYMENT.md](DEPLOYMENT.md#releasing)).
 
 ## Security
 
@@ -490,3 +543,6 @@ to the host**. Therefore:
 - The image runs as a non-root user (65532) from `scratch`.
 - The host's `/proc` (and optionally `/etc/passwd`) are mounted read-only;
   the panel shows process command lines but never environments.
+- The tailscaled socket (optional) is only used for `GET
+  /localapi/v0/status`; `/api/tailscale` returns the admin URL, tailnet name,
+  MagicDNS name and IPv4 of this node, nothing about keys or other peers.

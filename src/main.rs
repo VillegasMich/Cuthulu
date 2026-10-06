@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
+use cuthulu::build_info;
 use cuthulu::config::Config;
 use cuthulu::envfile::{self, EnvFile};
 use cuthulu::notify::Notifier;
@@ -12,6 +13,7 @@ use cuthulu::providers::docker::DockerProvider;
 use cuthulu::registry::Registry;
 use cuthulu::server::{self, AppState};
 use cuthulu::system::SystemMonitor;
+use cuthulu::tailscale::Tailscale;
 use cuthulu::todos::TodoStore;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -35,7 +37,10 @@ fn main() -> anyhow::Result<ExitCode> {
             return Ok(healthcheck(&EnvFile::load(envfile::FILE_NAME.as_ref())?));
         }
         Some("-V" | "--version") => {
-            println!("cuthulu {}", env!("CARGO_PKG_VERSION"));
+            match build_info::short_sha() {
+                Some(sha) => println!("cuthulu {} ({sha})", build_info::VERSION),
+                None => println!("cuthulu {}", build_info::VERSION),
+            }
             return Ok(ExitCode::SUCCESS);
         }
         Some("-h" | "--help") => {
@@ -87,13 +92,15 @@ async fn run(env: &EnvFile) -> anyhow::Result<()> {
         .await
         .with_context(|| format!("cannot listen on {}", config.bind))?;
     info!(
-        version = env!("CARGO_PKG_VERSION"),
+        version = build_info::VERSION,
+        git_sha = build_info::git_sha().unwrap_or("unknown"),
         read_only = config.read_only,
         "listening on http://{}",
         listener.local_addr()?
     );
 
     let system = SystemMonitor::new(&config, shutdown.clone());
+    let tailscale = Arc::new(Tailscale::new(&config));
     let app = server::router(AppState {
         registry,
         config: Arc::new(config),
@@ -101,6 +108,7 @@ async fn run(env: &EnvFile) -> anyhow::Result<()> {
         system,
         todos,
         notifier: Arc::clone(&notifier),
+        tailscale,
     });
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal(shutdown.clone()))

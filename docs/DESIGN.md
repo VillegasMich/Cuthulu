@@ -39,18 +39,23 @@ All colors are CSS custom properties on `:root`; themes only redefine tokens.
 |------------------|------------|------------|-----|
 | `--bg`           | `#0f1110`  | `#f7f7f4`  | page background |
 | `--surface`      | `#161917`  | `#ffffff`  | panels, table header |
-| `--border`       | `#262b28`  | `#dcdcd5`  | 1px rules |
+| `--hover`        | `#1c201d`  | `#efefea`  | row hover / selection background |
+| `--border`       | `#262b28`  | `#dcdcd5`  | 1px rules (decorative) |
+| `--line`         | `#60675f`  | `#858a83`  | outlines of buttons, inputs, `kbd` |
 | `--text`         | `#d4d7d2`  | `#1c1e1c`  | body text |
-| `--muted`        | `#7d847e`  | `#6b706b`  | secondary text, stopped |
-| `--accent`       | `#7fd962`  | `#2f7d32`  | focus, links, the eye |
-| `--ok`           | `#5fb85f`  | `#2e7d32`  | running / healthy |
-| `--warn`         | `#d4a72c`  | `#9a6b00`  | restarting / starting |
-| `--err`          | `#e5534b`  | `#c62828`  | exited non-zero / unhealthy / dead |
+| `--muted`        | `#969d96`  | `#5a5f5a`  | secondary text, stopped |
+| `--accent`       | `#7fd962`  | `#2a7530`  | focus, links, the eye, section headings |
+| `--ok`           | `#5fb85f`  | `#2a7530`  | running / healthy |
+| `--warn`         | `#d4a72c`  | `#8a5f00`  | restarting / starting |
+| `--err`          | `#ec5f57`  | `#c62828`  | exited non-zero / unhealthy / dead |
 | `--log-stderr`   | `#e58a84`  | `#b3261e`  | stderr lines |
+| `--key`          | `#5fadb7`  | `#1d6a75`  | key labels: detail `dt`, host-panel labels |
+| `--project`      | `#c495d3`  | `#883a8a`  | project / compose group |
+| `--tag`          | `#7eaee6`  | `#2259a0`  | image tag or digest (`:0.2.0`, `@sha256:…`) |
 | `--ansi-black`   | `#5a615b`  | `#1c1e1c`  | ANSI color 0 (SGR 30 / 40) |
-| `--ansi-red`     | `#e5534b`  | `#c62828`  | ANSI color 1 (SGR 31 / 41) |
-| `--ansi-green`   | `#5fb85f`  | `#2e7d32`  | ANSI color 2 (SGR 32 / 42) |
-| `--ansi-yellow`  | `#d4a72c`  | `#9a6b00`  | ANSI color 3 (SGR 33 / 43) |
+| `--ansi-red`     | `#ec5f57`  | `#c62828`  | ANSI color 1 (SGR 31 / 41) |
+| `--ansi-green`   | `#5fb85f`  | `#2a7530`  | ANSI color 2 (SGR 32 / 42) |
+| `--ansi-yellow`  | `#d4a72c`  | `#8a5f00`  | ANSI color 3 (SGR 33 / 43) |
 | `--ansi-blue`    | `#5f9bd8`  | `#1f5fa8`  | ANSI color 4 (SGR 34 / 44) |
 | `--ansi-magenta` | `#b781c6`  | `#8e3a8e`  | ANSI color 5 (SGR 35 / 45) |
 | `--ansi-cyan`    | `#4fb0b0`  | `#00727a`  | ANSI color 6 (SGR 36 / 46) |
@@ -68,6 +73,19 @@ The `--ansi-*` palette renders colors emitted by services in their logs. It
 reuses the status colors where they overlap and is tuned for contrast on
 `--bg` rather than fidelity: on the light theme "white" and "bright" colors
 are darker, so nothing turns invisible. No neon.
+
+Contrast (WCAG 2.x): every text token is at least 4.5:1 against `--bg`,
+`--surface` and `--hover` in both themes (`--muted` ≈ 6:1,
+`--key` / `--project` / `--tag` 5.4–8:1); `--line` is at least 3:1 against
+`--bg` and `--surface`, so controls stay identifiable. `--border` is for
+decorative rules only and may stay faint. Check new tokens against all three
+backgrounds before adding them.
+
+The data colors (`--key`, `--project`, `--tag`) are a small terminal palette
+— cyan keys like htop, magenta project, blue tag — used only where they help
+scanning: on the dashboard (project column, image tag, host-panel labels) and
+in the detail metadata. Everything else stays neutral; stopped rows stay
+`--muted` throughout.
 
 Theme selection: follow `prefers-color-scheme` by default; a toggle (`t`)
 stores an explicit choice in `localStorage` and sets `data-theme` on `<html>`.
@@ -94,15 +112,28 @@ stores an explicit choice in `localStorage` and sets `data-theme` on `<html>`.
     (pure CSS, so it also follows `prefers-color-scheme` live).
   - Notifications (`.btn.icon`, before the connection state): a bell, struck
     through when service alerts are off. Opens the notifications dialog.
+  - Tailscale (left of the theme toggle, only when Tailscale is available): a
+    link styled as `.btn.icon` with a three-node network glyph; opens this
+    machine in the Tailscale admin console in a new tab. The tooltip names
+    host, IP and tailnet. Hidden (not reserved) when unavailable. No brand
+    logo.
 - Host panel (dashboard, above the toolbar): see below.
 - Toolbar (dashboard): filter input and a `show stopped` checkbox. Stopped
   services are hidden by default (only `running` / `restarting` / `paused`
   rows show); the counts keep the full totals and mark the hidden part. The
   choice is stored in `localStorage` (`cuthulu.index.stopped`).
 - Main: sortable table. Sticky header. Row actions appear on hover/focus
-  (`start` / `stop` / `restart` as small text buttons).
-- Detail view: two panes — metadata on the left (narrow), logs on the right
-  (wide). On small screens they stack.
+  (`start` / `stop` / `restart` as small text buttons). Column widths are
+  adjustable with header splitters (see [Splitters](#splitters)).
+- Detail view: two panes — metadata on the left (narrow, 360px by default),
+  logs on the right (wide), with a splitter between them. On small screens
+  they stack.
+  - Metadata is a key/value list: keys in `--key`, values in `--text`, a
+    1px `--border` rule under each row (not the last). Project in
+    `--project`, image tag in `--tag`; in ports the host address and `/proto`
+    are `--muted`, so the port numbers stand out.
+  - Sections below it (`todo`, `env`, `labels`) start with a `--border` rule
+    and a bold `--accent` heading; their counts stay `--muted`.
 - Log viewer: monospace, line numbers or timestamps toggle, stderr tinted,
   filter box, "follow" toggle that turns off automatically when the user
   scrolls up. ANSI colors from the service are rendered with the `--ansi-*`
@@ -135,17 +166,52 @@ stores an explicit choice in `localStorage` and sets `data-theme` on `<html>`.
   and an error flash suggesting to stop it at its source. No new color
   tokens for any of this.
 - TODO list (detail view, left pane, below the metadata): heading
-  `todo 2/5` (done/total, muted count), one line per item: `[ ]` / `[x]`
+  `todo 2/5` (done/total, muted count; styled like the other sections), one line per item: `[ ]` / `[x]`
   text toggle (`--muted`, `--ok` when done), the text, and a small `del`
   button that appears on hover/focus like row actions. Done items are
   `--muted` and struck through. An input + `add` button below; Enter adds.
   The list scrolls past 40vh. No new color tokens.
 
+## Splitters
+
+Pane borders that can be dragged, so clipped text and boxes can be given more
+room. One component (`.split`, `splitter()` in `app.js`), used in three places:
+
+| Where | Moves | Bounds | Stored as |
+|-------|-------|--------|-----------|
+| Detail view, between info and logs | info column width | 220px … 70% | `cuthulu.split.meta` (px) |
+| Dashboard table, right edge of `state` … `ports` headers | the border between two columns | 56px per column, 120px for `name` | `cuthulu.split.cols` (% of the table, per column) |
+| Host panel, bottom border | panel body height (a max-height; it scrolls) | 2 text lines … full height | `cuthulu.split.sys` (px) |
+
+- **Look:** no new chrome. The line is the existing 1px `--border` rule —
+  the logs box's left border, the host panel's bottom border, or a 1px
+  `--border` line at each resizable header's right edge — and turns
+  `--accent` on hover, while dragging, and on keyboard focus. The hit area is
+  wider than the line (the 16px gap on the detail view, 7px elsewhere);
+  the cursor is `col-resize` / `row-resize`.
+- **Columns** trade width with their neighbour only: dragging a border
+  moves just that border. `name` has no width of its own and takes what is
+  left. Widths are a fixed table layout above 900px.
+- **Host panel** heights snap to whole text lines, so no row is cut in half.
+  Dragging back to full height forgets the limit.
+- **Keyboard:** each splitter is focusable (`role="separator"`,
+  `aria-orientation`, `aria-valuenow/min/max` in px). Arrow keys along its
+  axis step 16px (one line for the host panel), 4× with shift; `Home` /
+  `End` or a double-click restore the default.
+- **Persistence:** per browser in `localStorage`; `theme.js` applies stored
+  sizes as CSS custom properties (`--split-meta`, `--split-sys`, `--col-*`)
+  before first paint, so nothing jumps on load. Without storage, sizes last
+  for the page.
+- **Narrow screens** (≤ 900px), where the detail panes stack and the table
+  drops columns, hide the detail and column splitters and ignore stored
+  column widths.
+
 ## Icons
 
 Text labels win by default. The few icons (the eye, back arrow, sun/moon,
-bell) are hand-written inline SVGs: 14px in a 24-unit viewBox, `fill: none`,
-`stroke: currentColor`, round caps/joins, no fills except the pupil. Icon
+bell, the Tailscale network glyph) are hand-written inline SVGs: 14px
+in a 24-unit viewBox, `fill: none`, `stroke: currentColor`, round
+caps/joins, no fills except the pupil. Icon
 buttons (`.btn.icon`) keep the box of a text `.btn`, are `--muted` until
 hover, and always carry `aria-label` + `title`.
 
@@ -176,12 +242,12 @@ in `localStorage` (`cuthulu.sys.open`), as is the process sort
   `--ok` below the warn threshold, `--warn` up to the error threshold, then
   `--err`, so a fuller bar runs green → yellow → red and its tip shows the
   level. Thresholds: CPU 70 / 90 %, Mem 75 / 90 %, Swp 50 / 80 %; the
-  1-minute load number uses load ÷ cores at 70 / 100 %. Labels and brackets
-  are `--muted`.
+  1-minute load number uses load ÷ cores at 70 / 100 %. Labels are `--key`
+  (cyan, as in htop), brackets `--muted`.
 - CPU meters use enough columns to stay about four rows tall (2 columns for
   ≤ 8 cores, up to 8); Mem/Swp span the CPU block's width. Below 600px one
   column.
-- Info column: a label / value list (`dt` in `--muted`). Rates are padded
+- Info column: a label / value list (`dt` in `--key`). Rates are padded
   to a fixed width so the line does not jitter; the network tooltip gives
   Mbit/s. `↓` / `↑` are plain text glyphs.
 - Addresses: one per row, the default-route interface's first, each with a
@@ -211,6 +277,7 @@ in `localStorage` (`cuthulu.sys.open`), as is the process sort
 | `t`        | toggle theme |
 | `Esc`      | back (same as the back arrow) / close / clear filter / clear selection |
 | `?`        | show shortcuts |
+| `←` `→` / `↑` `↓` | resize, when a splitter has focus (`Home` / `End`: reset) |
 
 ## The eye
 
