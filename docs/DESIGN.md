@@ -39,18 +39,23 @@ All colors are CSS custom properties on `:root`; themes only redefine tokens.
 |------------------|------------|------------|-----|
 | `--bg`           | `#0f1110`  | `#f7f7f4`  | page background |
 | `--surface`      | `#161917`  | `#ffffff`  | panels, table header |
-| `--border`       | `#262b28`  | `#dcdcd5`  | 1px rules |
+| `--hover`        | `#1c201d`  | `#efefea`  | row hover / selection background |
+| `--border`       | `#262b28`  | `#dcdcd5`  | 1px rules (decorative) |
+| `--line`         | `#60675f`  | `#858a83`  | outlines of buttons, inputs, `kbd` |
 | `--text`         | `#d4d7d2`  | `#1c1e1c`  | body text |
-| `--muted`        | `#7d847e`  | `#6b706b`  | secondary text, stopped |
-| `--accent`       | `#7fd962`  | `#2f7d32`  | focus, links, the eye |
-| `--ok`           | `#5fb85f`  | `#2e7d32`  | running / healthy |
-| `--warn`         | `#d4a72c`  | `#9a6b00`  | restarting / starting |
-| `--err`          | `#e5534b`  | `#c62828`  | exited non-zero / unhealthy / dead |
+| `--muted`        | `#969d96`  | `#5a5f5a`  | secondary text, stopped |
+| `--accent`       | `#7fd962`  | `#2a7530`  | focus, links, the eye, section headings |
+| `--ok`           | `#5fb85f`  | `#2a7530`  | running / healthy |
+| `--warn`         | `#d4a72c`  | `#8a5f00`  | restarting / starting |
+| `--err`          | `#ec5f57`  | `#c62828`  | exited non-zero / unhealthy / dead |
 | `--log-stderr`   | `#e58a84`  | `#b3261e`  | stderr lines |
+| `--key`          | `#5fadb7`  | `#1d6a75`  | key labels: detail `dt`, host-panel labels |
+| `--project`      | `#c495d3`  | `#883a8a`  | project / compose group |
+| `--tag`          | `#7eaee6`  | `#2259a0`  | image tag or digest (`:0.2.0`, `@sha256:…`) |
 | `--ansi-black`   | `#5a615b`  | `#1c1e1c`  | ANSI color 0 (SGR 30 / 40) |
-| `--ansi-red`     | `#e5534b`  | `#c62828`  | ANSI color 1 (SGR 31 / 41) |
-| `--ansi-green`   | `#5fb85f`  | `#2e7d32`  | ANSI color 2 (SGR 32 / 42) |
-| `--ansi-yellow`  | `#d4a72c`  | `#9a6b00`  | ANSI color 3 (SGR 33 / 43) |
+| `--ansi-red`     | `#ec5f57`  | `#c62828`  | ANSI color 1 (SGR 31 / 41) |
+| `--ansi-green`   | `#5fb85f`  | `#2a7530`  | ANSI color 2 (SGR 32 / 42) |
+| `--ansi-yellow`  | `#d4a72c`  | `#8a5f00`  | ANSI color 3 (SGR 33 / 43) |
 | `--ansi-blue`    | `#5f9bd8`  | `#1f5fa8`  | ANSI color 4 (SGR 34 / 44) |
 | `--ansi-magenta` | `#b781c6`  | `#8e3a8e`  | ANSI color 5 (SGR 35 / 45) |
 | `--ansi-cyan`    | `#4fb0b0`  | `#00727a`  | ANSI color 6 (SGR 36 / 46) |
@@ -68,6 +73,19 @@ The `--ansi-*` palette renders colors emitted by services in their logs. It
 reuses the status colors where they overlap and is tuned for contrast on
 `--bg` rather than fidelity: on the light theme "white" and "bright" colors
 are darker, so nothing turns invisible. No neon.
+
+Contrast (WCAG 2.x): every text token is at least 4.5:1 against `--bg`,
+`--surface` and `--hover` in both themes (`--muted` ≈ 6:1,
+`--key` / `--project` / `--tag` 5.4–8:1); `--line` is at least 3:1 against
+`--bg` and `--surface`, so controls stay identifiable. `--border` is for
+decorative rules only and may stay faint. Check new tokens against all three
+backgrounds before adding them.
+
+The data colors (`--key`, `--project`, `--tag`) are a small terminal palette
+— cyan keys like htop, magenta project, blue tag — used only where they help
+scanning: on the dashboard (project column, image tag, host-panel labels) and
+in the detail metadata. Everything else stays neutral; stopped rows stay
+`--muted` throughout.
 
 Theme selection: follow `prefers-color-scheme` by default; a toggle (`t`)
 stores an explicit choice in `localStorage` and sets `data-theme` on `<html>`.
@@ -101,6 +119,12 @@ stores an explicit choice in `localStorage` and sets `data-theme` on `<html>`.
   (`start` / `stop` / `restart` as small text buttons).
 - Detail view: two panes — metadata on the left (narrow), logs on the right
   (wide). On small screens they stack.
+  - Metadata is a key/value list: keys in `--key`, values in `--text`, a
+    1px `--border` rule under each row (not the last). Project in
+    `--project`, image tag in `--tag`; in ports the host address and `/proto`
+    are `--muted`, so the port numbers stand out.
+  - Sections below it (`todo`, `env`, `labels`) start with a `--border` rule
+    and a bold `--accent` heading; their counts stay `--muted`.
 - Log viewer: monospace, line numbers or timestamps toggle, stderr tinted,
   filter box, "follow" toggle that turns off automatically when the user
   scrolls up. ANSI colors from the service are rendered with the `--ansi-*`
@@ -111,7 +135,7 @@ stores an explicit choice in `localStorage` and sets `data-theme` on `<html>`.
   line. Colored spans override the stderr tint; the rest of an stderr line
   keeps it. A `color` checkbox turns all of it off (remembered).
 - TODO list (detail view, left pane, below the metadata): heading
-  `todo 2/5` (done/total, muted count), one line per item: `[ ]` / `[x]`
+  `todo 2/5` (done/total, muted count; styled like the other sections), one line per item: `[ ]` / `[x]`
   text toggle (`--muted`, `--ok` when done), the text, and a small `del`
   button that appears on hover/focus like row actions. Done items are
   `--muted` and struck through. An input + `add` button below; Enter adds.
@@ -152,12 +176,12 @@ in `localStorage` (`cuthulu.sys.open`), as is the process sort
   `--ok` below the warn threshold, `--warn` up to the error threshold, then
   `--err`, so a fuller bar runs green → yellow → red and its tip shows the
   level. Thresholds: CPU 70 / 90 %, Mem 75 / 90 %, Swp 50 / 80 %; the
-  1-minute load number uses load ÷ cores at 70 / 100 %. Labels and brackets
-  are `--muted`.
+  1-minute load number uses load ÷ cores at 70 / 100 %. Labels are `--key`
+  (cyan, as in htop), brackets `--muted`.
 - CPU meters use enough columns to stay about four rows tall (2 columns for
   ≤ 8 cores, up to 8); Mem/Swp span the CPU block's width. Below 600px one
   column.
-- Info column: a label / value list (`dt` in `--muted`). Rates are padded
+- Info column: a label / value list (`dt` in `--key`). Rates are padded
   to a fixed width so the line does not jitter; the network tooltip gives
   Mbit/s. `↓` / `↑` are plain text glyphs.
 - Addresses: one per row, the default-route interface's first, each with a

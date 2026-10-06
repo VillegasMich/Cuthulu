@@ -44,6 +44,7 @@ Each phase should end in something runnable. Tick items as they land.
 - [x] Highlight log level keywords on uncolored lines
 - [ ] Download logs
 - [x] Per-service TODO list on the detail page (`CUTHULU_DATA_DIR/todos.json`)
+- [x] WCAG contrast pass (text ≥ 4.5:1, controls ≥ 3:1) and data colors (`--key`, `--project`, `--tag`)
 
 ## Host panel ✓
 - [x] Read host CPU, memory, swap, load, uptime, network (addresses, ↓/↑ throughput) and disk I/O from procfs (`src/system/`, no external binaries)
