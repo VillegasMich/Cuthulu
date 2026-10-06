@@ -142,6 +142,8 @@ pub struct LoadAvg {
     pub one: f64,
     pub five: f64,
     pub fifteen: f64,
+    /// Kernel scheduling entities (threads) runnable right now.
+    pub running: u32,
     /// Kernel scheduling entities (threads) that exist right now.
     pub threads: u32,
 }
@@ -156,15 +158,16 @@ pub fn parse_loadavg(s: &str) -> Result<LoadAvg, ParseError> {
             .ok_or_else(|| err(FILE, "expected three load averages"))
     };
     let (one, five, fifteen) = (load()?, load()?, load()?);
-    let threads = it
+    let (running, threads) = it
         .next()
         .and_then(|v| v.split_once('/'))
-        .and_then(|(_, n)| n.parse().ok())
+        .and_then(|(r, n)| Some((r.parse().ok()?, n.parse().ok()?)))
         .ok_or_else(|| err(FILE, "expected running/total"))?;
     Ok(LoadAvg {
         one,
         five,
         fifteen,
+        running,
         threads,
     })
 }
@@ -395,7 +398,7 @@ SReclaimable:     400000 kB
         let l = parse_loadavg("8.47 3.08 1.80 21/1708 68864\n").unwrap();
         assert!((l.one - 8.47).abs() < 1e-9);
         assert!((l.fifteen - 1.80).abs() < 1e-9);
-        assert_eq!(l.threads, 1708);
+        assert_eq!((l.running, l.threads), (21, 1708));
         assert!(parse_loadavg("1.0 2.0\n").is_err());
         assert!(parse_loadavg("1.0 2.0 3.0 nope\n").is_err());
     }

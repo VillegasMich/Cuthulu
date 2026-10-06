@@ -58,7 +58,7 @@ pub struct Snapshot {
     /// Processes visible under the proc dir (fewer with `hidepid`).
     pub tasks: u32,
     pub threads: u32,
-    /// Processes in state `R`.
+    /// Runnable threads (from `/proc/loadavg`).
     pub running: u32,
     pub uptime_secs: u64,
     /// How many processes the client should list.
@@ -349,7 +349,6 @@ fn build(
         .iter()
         .map(|(pid, p)| (*pid, p, proc_cpu(*pid, p)))
         .collect();
-    let running = all.iter().filter(|(_, p, _)| p.stat.state == 'R').count();
 
     // Highest first; ties broken by the other key, then by pid.
     let rss = |i: usize| all[i].1.status.rss;
@@ -408,7 +407,7 @@ fn build(
         load: [host.load.one, host.load.five, host.load.fifteen],
         tasks: u32::try_from(now.procs.len()).unwrap_or(u32::MAX),
         threads: host.load.threads,
-        running: u32::try_from(running).unwrap_or(u32::MAX),
+        running: host.load.running,
         uptime_secs: host.uptime,
         top: TOP,
         procs,
@@ -606,7 +605,6 @@ pub(crate) mod tests {
             !s.procs.iter().any(|p| p.pid == 1),
             "neither busy nor big enough"
         );
-        assert_eq!(s.running, 15);
     }
 
     #[tokio::test]
@@ -627,7 +625,7 @@ pub(crate) mod tests {
             }
         );
         assert_eq!(s.uptime_secs, 3600);
-        assert_eq!((s.tasks, s.threads), (2, 40));
+        assert_eq!((s.tasks, s.running, s.threads), (2, 1, 40));
         assert_eq!(s.cpus.len(), 2);
         let init = s.procs.iter().find(|p| p.pid == 1).unwrap();
         assert_eq!(init.cmd, "/sbin/init");

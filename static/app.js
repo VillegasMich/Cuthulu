@@ -529,6 +529,178 @@ function initService() {
   open();
 }
 
+// ── host panel (fed by /api/system/stream) ─────────────────
+
+/** htop-style sizes: 512K, 840M, 5.8G. */
+function fmtBytes(b) {
+  const K = 1024, M = K * K, G = M * K;
+  if (b >= G) return `${(b / G).toFixed(1)}G`;
+  if (b >= M) return `${Math.round(b / M)}M`;
+  return `${Math.round(b / K)}K`;
+}
+
+/** ok / warn / err for a percentage; thresholds are in docs/DESIGN.md. */
+const level = (pct, warn, err) => (pct >= err ? "err" : pct >= warn ? "warn" : "ok");
+
+const METER_W = 26; // ch per CPU meter: label 4 + "[" + bar 20 + "]"
+const METER_GAP = 2; // ch between meter columns
+
+/**
+ * One text meter, `lbl[|||||     text]`: the bar is `width` characters of
+ * pipes and spaces with the value written over its right end, like htop.
+ */
+function meter(label, pct, text, width, lvl) {
+  const p = Math.max(0, Math.min(100, pct));
+  const room = Math.max(0, width - text.length);
+  const pipes = Math.min(room, Math.round((p / 100) * width));
+  return el(
+    "div",
+    {
+      class: "meter",
+      role: "meter",
+      "aria-label": label.trim(),
+      "aria-valuemin": "0",
+      "aria-valuemax": "100",
+      "aria-valuenow": String(Math.round(p)),
+      "aria-valuetext": text,
+    },
+    el("span", { class: "lbl" }, label),
+    el("span", { class: "br" }, "["),
+    el("span", { class: `fill ${lvl}` }, "|".repeat(pipes)),
+    " ".repeat(width - pipes - text.length),
+    el("span", { class: "val" }, text),
+    el("span", { class: "br" }, "]"),
+  );
+}
+
+function initSystem() {
+  const root = $("#sys");
+  if (!root) return;
+  const toggle = $("#sys-toggle");
+  const stateEl = $("#sys-state");
+  const narrow = matchMedia("(max-width: 600px)");
+  let open = pref("sys.open", true);
+  let byMem = pref("sys.mem", false);
+  let es = null;
+  let snap = null;
+  let problem = "";
+
+  function draw() {
+    fill(stateEl, problem ? el("span", { class: "err" }, problem) : null);
+    if (!snap) return;
+    const s = snap;
+    $("#sys-host").textContent = s.hostname || "";
+
+    // Enough columns that the CPU block stays about four rows tall.
+    const n = s.cpus.length;
+    const cols = narrow.matches ? 1 : Math.min(8, Math.max(2, Math.ceil(n / 4)));
+    const cpus = $("#sys-cpus");
+    cpus.style.gridTemplateColumns = `repeat(${Math.min(cols, n || 1)}, ${METER_W}ch)`;
+    cpus.replaceChildren(
+      ...s.cpus.map((pct, i) =>
+        meter(String(i).padStart(3) + " ", pct, `${pct.toFixed(1)}%`, METER_W - 6, level(pct, 70, 90)),
+      ),
+    );
+
+    // Memory meters span the CPU block's full width.
+    const span = Math.min(cols, n || 1);
+    const wide = span * METER_W + (span - 1) * METER_GAP - 6;
+    const usage = (label, u, warn, err) => {
+      const pct = u.total ? (u.used / u.total) * 100 : 0;
+      return meter(label, pct, `${fmtBytes(u.used)}/${fmtBytes(u.total)}`, wide, level(pct, warn, err));
+    };
+    fill($("#sys-mem"), usage("Mem ", s.mem, 75, 90), usage("Swp ", s.swap, 50, 80));
+
+    const ncpu = n || 1;
+    const k = (t) => el("span", { class: "k" }, t);
+    fill(
+      $("#sys-info"),
+      el("div", {},
+        k("Load "),
+        el("span", { class: `lv-${level((s.load[0] / ncpu) * 100, 70, 100)}` }, s.load[0].toFixed(2)),
+        ` ${s.load[1].toFixed(2)} ${s.load[2].toFixed(2)}`,
+      ),
+      el("div", {}, k("Tasks "), `${s.tasks}, ${s.threads} thr; ${s.running} running`),
+      el("div", {}, k("Up    "), fmtDur(s.uptime_secs * 1000)),
+    );
+
+    for (const th of root.querySelectorAll("th[data-sort]")) {
+      const on = (th.dataset.sort === "mem") === byMem;
+      th.setAttribute("aria-sort", on ? "descending" : "none");
+    }
+    const key = byMem ? (p) => p.rss : (p) => p.cpu;
+    const procs = [...s.procs].sort((a, b) => key(b) - key(a) || a.pid - b.pid).slice(0, s.top);
+    const rows = procs.map((p) =>
+      el(
+        "tr",
+        {},
+        el("td", { class: "p-pid num" }, String(p.pid)),
+        el("td", { class: "p-user", title: `uid ${p.uid}` }, p.user || String(p.uid)),
+        el("td", { class: "p-cpu num" }, p.cpu.toFixed(1)),
+        el("td", { class: "p-mem num" }, p.mem.toFixed(1)),
+        el("td", { class: "p-res num" }, fmtBytes(p.rss)),
+        el("td", { class: "p-cmd", title: p.cmd }, p.cmd),
+      ),
+    );
+    const body = $("#sys-procs");
+    if (rows.length) body.replaceChildren(...rows);
+    else body.replaceChildren(el("tr", { class: "placeholder" }, el("td", { colspan: "6" }, "no processes visible")));
+  }
+
+  // The stream is open only while the panel is expanded and the tab is
+  // visible; the server samples only while some stream is open.
+  function sync() {
+    const want = open && document.visibilityState === "visible";
+    if (want && !es) {
+      es = new EventSource("/api/system/stream");
+      es.addEventListener("system", (e) => {
+        snap = JSON.parse(e.data);
+        problem = "";
+        draw();
+      });
+      es.addEventListener("failure", (e) => {
+        problem = `unavailable: ${e.data}`;
+        draw();
+      });
+      // The browser reconnects on its own; every event is a full snapshot.
+      es.onerror = () => {
+        problem = "reconnecting…";
+        draw();
+      };
+    } else if (!want && es) {
+      es.close();
+      es = null;
+    }
+  }
+
+  function setOpen(on) {
+    open = on;
+    root.dataset.open = String(on);
+    toggle.setAttribute("aria-expanded", String(on));
+    $("#sys-body").hidden = !on;
+    setPref("sys.open", on);
+    sync();
+  }
+
+  toggle.addEventListener("click", () => setOpen(!open));
+  for (const b of root.querySelectorAll("button.sort")) {
+    b.addEventListener("click", () => {
+      byMem = b.dataset.sort === "mem";
+      setPref("sys.mem", byMem);
+      draw();
+    });
+  }
+  document.addEventListener("visibilitychange", sync);
+  narrow.addEventListener("change", draw);
+  document.addEventListener("keydown", (e) => {
+    if (e.ctrlKey || e.metaKey || e.altKey || typing(e)) return;
+    if (e.key === "m") setOpen(!open);
+  });
+
+  setOpen(open);
+  draw();
+}
+
 // ── boot ───────────────────────────────────────────────────
 
 $("#theme").addEventListener("click", toggleTheme);
@@ -539,6 +711,7 @@ document.addEventListener("keydown", (e) => {
 });
 
 if (page === "index") initIndex();
+if (page === "index") initSystem();
 if (page === "service") initService();
 connect();
 setInterval(changed, 10_000);

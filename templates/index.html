@@ -7,6 +7,39 @@
 {% endblock %}
 
 {% block main %}
+<section id="sys" class="sys" aria-label="host system">
+  <h2 class="sys-head">
+    <button id="sys-toggle" class="sys-toggle" type="button" aria-expanded="true" aria-controls="sys-body"
+            title="toggle host panel (m)"><span class="caret" aria-hidden="true"></span>host</button>
+    <span id="sys-host" class="muted"></span>
+    <span id="sys-state" class="sys-state" role="status"></span>
+  </h2>
+  <div id="sys-body" class="sys-body">
+    <div class="sys-meters">
+      <div id="sys-cpus" class="meters"></div>
+      <div id="sys-mem" class="meters"></div>
+      <div id="sys-info" class="sys-info"></div>
+    </div>
+    <div class="sys-procs">
+      <table class="procs">
+        <thead>
+          <tr>
+            <th class="p-pid num">pid</th>
+            <th class="p-user">user</th>
+            <th class="p-cpu num" data-sort="cpu"><button class="sort" type="button" data-sort="cpu">cpu%</button></th>
+            <th class="p-mem num" data-sort="mem"><button class="sort" type="button" data-sort="mem">mem%</button></th>
+            <th class="p-res num">res</th>
+            <th>command</th>
+          </tr>
+        </thead>
+        <tbody id="sys-procs">
+          <tr class="placeholder"><td colspan="6">sampling…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
 <div class="toolbar">
   <input id="filter" class="input" type="search" placeholder="filter name, image, project  [/]"
          autocomplete="off" spellcheck="false" aria-label="filter services">
