@@ -2,7 +2,8 @@
 
 Cuthulu — self-hosted dashboard to monitor and control services (Docker
 containers first) on a single Linux machine. Runs as a container itself.
-Early stage: docs are ahead of code.
+Roadmap phases 0–4 are implemented; `docs/ARCHITECTURE.md` describes the code
+as it is.
 
 ## Read first
 
@@ -14,21 +15,42 @@ Early stage: docs are ahead of code.
 
 ## Stack
 
-Rust 2024 · tokio · axum · bollard (Docker API) · askama templates · htmx +
-small vanilla JS · hand-written CSS · rust-embed. No Node toolchain, no CDN
-assets, no database.
+Rust 2024 (MSRV 1.88) · tokio · axum · bollard (Docker API) · askama page
+shells · vanilla JS (`static/app.js`) · hand-written CSS · rust-embed. No
+Node toolchain, no CDN assets, no database.
 
 ## Commands
 
 ```sh
-cargo run                         # dev server on :8686, needs docker socket access
+cargo run                         # dev server on 127.0.0.1:8686, needs docker socket access
 cargo test
 cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-docker build -t cuthulu .         # once Dockerfile exists
+cargo clippy --all-targets -- -D warnings   # pedantic lints are on (Cargo.toml [lints])
+cargo deny check                  # licenses, advisories, bans
+docker build -t cuthulu .
+DOCKER_GID=$(stat -c %g /var/run/docker.sock) docker compose up -d --build
 ```
 
-Run fmt, clippy and tests before considering a change done.
+Run fmt, clippy and tests before considering a change done. CI
+(`.github/workflows/ci.yml`) also runs rustdoc, MSRV, cargo-deny, typos and a
+docker build + smoke test.
+
+## Where things live
+
+- `src/providers/docker.rs` — all Docker access; mapping functions are pure and unit-tested.
+- `src/registry.rs` — cache + watch loop; `tests::MockProvider` drives registry and HTTP tests.
+- `src/server.rs` — router + HTTP-level tests (`tower::ServiceExt::oneshot`).
+- `src/api/` — JSON + SSE handlers; `src/web.rs` — page shells and assets.
+- `templates/` (askama) and `static/` (embedded; read from disk in debug builds,
+  so CSS/JS changes need only a browser reload).
+
+## Testing
+
+- Unit/HTTP tests need no Docker: use `MockProvider`.
+- Against real Docker, use throwaway `cuthulu-*` containers (see below).
+- UI checks: headless Chrome is available (`google-chrome --headless=new`).
+  SSE keeps pages "loading", so drive it over CDP with a fixed wait rather
+  than `--screenshot` with `--virtual-time-budget`.
 
 ## Rules
 
@@ -44,7 +66,10 @@ Run fmt, clippy and tests before considering a change done.
 - **UI style:** dense, monospace, terminal-like, light+dark via CSS custom
   properties. No gradients, glassmorphism, emoji icons, big rounded shadowed
   cards, or marketing copy. Follow `docs/DESIGN.md` tokens exactly.
-- **Offline:** vendor all frontend assets (htmx, fonts) under `static/`.
+- **Offline:** vendor all frontend assets (fonts, any future JS lib) under `static/`.
+- **SSE events need non-empty `data`** — browsers drop empty ones.
+- **Frontend:** build DOM with `el()`/`textContent`, never `innerHTML` with
+  service data (names, logs are untrusted). CSP forbids inline scripts.
 - Library code returns typed errors (`thiserror`); `anyhow` only in `main.rs`.
 - Config only via `CUTHULU_*` env vars; document new ones in ARCHITECTURE.md.
 - Keep docs in sync: if a decision in `docs/` changes, update the doc in the

@@ -1,101 +1,141 @@
 # Architecture
 
-Status: **proposed**. Nothing below is implemented yet; this is the plan the
-first phases should follow. Update this file when decisions change.
+Status: **implemented** for the Docker provider (roadmap phases 0–4). Update
+this file in the same change when a decision moves.
 
 ## Overview
 
 ```
  Browser ──HTTP/SSE──▶ cuthulu (single Rust binary, in a container)
                           │
-                          ├── web      : HTML pages + static assets (embedded)
-                          ├── api      : JSON + Server-Sent Events
-                          ├── registry : in-memory view of all services
+                          ├── web       : HTML page shells + embedded static assets
+                          ├── api       : JSON + Server-Sent Events
+                          ├── registry  : in-memory view of all services
                           └── providers
                                 └── docker ──unix socket──▶ /var/run/docker.sock
 ```
 
-One process, one binary, no database. All state is derived from the
-providers (Docker is the source of truth) and kept in memory.
+One process, one binary, no database. Docker is the source of truth; the
+registry is a cache of it kept current by events.
 
 ## Stack
 
 | Concern            | Choice                                   | Why |
 |--------------------|------------------------------------------|-----|
-| Language           | Rust (edition 2024)                      | Already initialised; small static binary, low idle footprint for an always-on tool |
+| Language           | Rust (edition 2024, MSRV 1.88)           | Small static binary, low idle footprint for an always-on tool |
 | Async runtime      | `tokio`                                  | Standard |
-| HTTP server        | `axum`                                   | Tokio-native, first-class SSE support |
+| HTTP server        | `axum` 0.8                               | Tokio-native, first-class SSE |
 | Docker client      | `bollard`                                | Async Docker Engine API client over the unix socket |
-| Templates          | `askama`                                 | Compile-time checked HTML templates |
-| Frontend behaviour | `htmx` + small vanilla JS (log viewer)   | No Node toolchain, no build step, fits server-rendered pages |
-| Styling            | Hand-written CSS with custom properties  | Full control over the look; themes via CSS variables |
-| Asset embedding    | `rust-embed`                             | Ship one binary; works offline |
-| Errors             | `thiserror` (lib code), `anyhow` (main)  | |
-| Logging            | `tracing` + `tracing-subscriber`         | |
-| Config             | env vars (`CUTHULU_*`)                   | Natural for a container |
+| Templates          | `askama`                                 | Compile-time checked HTML page shells |
+| Frontend behaviour | vanilla JS (`static/app.js`), no framework | Live table, log viewer and keyboard handling are JS anyway; no Node toolchain, no build step |
+| Styling            | hand-written CSS with custom properties  | Full control of the look; themes via CSS variables |
+| Asset embedding    | `rust-embed`                             | One binary; works offline. In debug builds files are read from disk, so CSS/JS edits need no rebuild |
+| Errors             | `thiserror` (library), `anyhow` (`main.rs` only) | |
+| Logging            | `tracing` + `tracing-subscriber`         | `RUST_LOG` filter |
 
-Frontend assets (htmx, fonts) are vendored into the repo, never loaded from a
-CDN — the dashboard must work with no internet connection.
+> **Decision (2026-10):** the first draft planned `htmx`. Because every
+> dynamic part of the UI is driven by SSE events that patch rows client-side,
+> htmx would have added a dependency without removing any JS. Dropped.
+
+All frontend assets (JS, CSS, the JetBrains Mono font) live under `static/`
+and are embedded in the binary. Nothing is loaded from a CDN.
+
+## Source layout
+
+```
+src/
+  main.rs              CLI (run | healthcheck | --version), tracing, graceful shutdown
+  lib.rs
+  config.rs            CUTHULU_* env parsing (pure, unit-tested via a lookup fn)
+  model.rs             Service, ServiceId, ServiceState, Action, LogLine, …
+  registry.rs          in-memory state, watch loop per provider, broadcast; MockProvider for tests
+  server.rs            AppState, router, security headers; HTTP-level tests
+  web.rs               askama page handlers, embedded asset handler (ETag)
+  api/
+    mod.rs             /api router
+    services.rs        list / detail / actions
+    events.rs          SSE: registry changes
+    logs.rs            SSE: log lines
+    guard.rs           CSRF / same-origin check for POSTs
+    error.rs           ApiError → JSON { error, code }
+  providers/
+    mod.rs             Provider trait, ProviderError, ProviderEvent
+    docker.rs          bollard-backed implementation (the only bollard user)
+    lines.rs           log chunk → line splitting, timestamp parsing, ANSI stripping
+templates/             base, index, service, not_found
+static/                app.css, app.js, theme.js, eye.svg, fonts/
+```
 
 ## Core model
 
 ```rust
-/// Stable id across providers: "<provider>:<native id>", e.g. "docker:3f2a9c…"
+/// "<provider>:<native id>", e.g. "docker:3f2a9c…". Validated on parse.
 pub struct ServiceId(String);
 
-pub enum ServiceState { Running, Stopped, Restarting, Paused, Created, Dead, Unknown }
-
+pub enum ServiceState { Running, Restarting, Paused, Created, Stopped, Dead, Unknown }
 pub enum Health { Healthy, Unhealthy, Starting, None }
 
 pub struct Service {
     pub id: ServiceId,
-    pub provider: ProviderKind,      // Docker for now
+    pub provider: ProviderKind,
     pub name: String,
     pub image: Option<String>,
     pub state: ServiceState,
     pub health: Health,
-    pub started_at: Option<DateTime>,
+    pub started_at: Option<String>,   // RFC 3339; the client computes uptime
+    pub finished_at: Option<String>,
+    pub exit_code: Option<i64>,       // only when stopped/dead
     pub ports: Vec<PortMapping>,
-    pub group: Option<String>,       // e.g. compose project
-    pub labels: BTreeMap<String, String>,
-    pub is_self: bool,               // true for Cuthulu's own container
+    pub group: Option<String>,        // compose project
+    pub is_self: bool,
 }
-
-pub enum Action { Start, Stop, Restart }
 ```
 
-## Provider abstraction (the scalability seam)
+`ServiceDetail` adds command, restart policy/count, mounts, networks, labels
+and **env var names only** — values are never read into the model.
 
-Every source of services implements one trait. Docker is the first
-implementation; systemd, plain processes or remote hosts come later without
-touching the API or UI.
+## Provider abstraction (the scalability seam)
 
 ```rust
 #[async_trait]
 pub trait Provider: Send + Sync {
     fn kind(&self) -> ProviderKind;
     async fn list(&self) -> Result<Vec<Service>>;
-    async fn inspect(&self, id: &ServiceId) -> Result<ServiceDetail>;
+    async fn get(&self, id: &ServiceId) -> Result<Option<Service>>;
+    async fn detail(&self, id: &ServiceId) -> Result<ServiceDetail>;
     async fn logs(&self, id: &ServiceId, opts: LogOptions) -> Result<BoxStream<'static, Result<LogLine>>>;
     async fn act(&self, id: &ServiceId, action: Action) -> Result<()>;
-    fn events(&self) -> BoxStream<'static, ServiceEvent>;
+    fn events(&self) -> BoxStream<'static, Result<ProviderEvent>>;   // Changed(id) | Removed(id)
 }
 ```
 
-Native `async fn` in traits is not dyn-compatible, so use `async-trait` (or
-hand-written `BoxFuture`s) to keep `Arc<dyn Provider>` working.
+`async-trait` keeps `Arc<dyn Provider>` possible (native async fn in traits is
+not dyn-compatible). Adding systemd later = one new file in `providers/`.
+
+Docker specifics:
+- `list()` = one `GET /containers/json?all=1`, then inspect each container with
+  bounded concurrency (16), because only inspect has `StartedAt`, health and
+  exit code.
+- Events are filtered to container events and to the actions that change what
+  is displayed (`start`, `die`, `health_status: …`, `destroy`, …); noisy
+  `exec_*` events from healthchecks are ignored.
+- `act()` treats HTTP 304 ("already started/stopped") as success.
 
 ## Registry and live updates
 
-- On startup the registry calls `list()` on every provider.
-- It then subscribes to `events()` (for Docker: the `/events` stream filtered
-  to container events) and applies changes incrementally.
-- A periodic **reconcile** (e.g. every 30s) re-lists to heal any missed event.
-- Changes are broadcast on a `tokio::sync::broadcast` channel; each browser
-  tab holds one SSE connection to `/api/events`.
+Per provider, a watch loop:
 
-**No per-container polling.** Cost of idle monitoring must not grow with the
-number of services.
+1. subscribe to `events()`, then `list()` (subscribe first so nothing is lost);
+2. apply each event by re-reading just that service (`get`);
+3. every `CUTHULU_RECONCILE_SECS` (default 60) re-`list()` to heal anything
+   missed;
+4. on any error: mark the provider disconnected, back off (1s → 30s), restart.
+
+Every change is diffed against the cache and only real changes are broadcast
+on a bounded `tokio::sync::broadcast` channel (capacity 1024).
+
+**No per-container polling.** Idle cost does not grow with the number of
+services.
 
 ## HTTP API
 
@@ -103,85 +143,72 @@ number of services.
 |--------|------------------------------------|-------------|
 | GET    | `/`                                | Dashboard page |
 | GET    | `/services/{id}`                   | Service detail page |
-| GET    | `/api/services`                    | JSON list (supports `?q=`, `?state=`, `?group=`) |
+| GET    | `/static/{path}`                   | Embedded assets (`ETag`, `Cache-Control: no-cache`) |
+| GET    | `/healthz`                         | Liveness (`ok`) |
+| GET    | `/api/services`                    | JSON list; `?q=` (name/image/project), `?state=`, `?group=` |
 | GET    | `/api/services/{id}`               | JSON detail |
-| POST   | `/api/services/{id}/start`         | Start |
-| POST   | `/api/services/{id}/stop`          | Stop (refused if `is_self`) |
-| POST   | `/api/services/{id}/restart`       | Restart |
-| GET    | `/api/services/{id}/logs`          | SSE log stream (`?tail=500&follow=true&since=`) |
-| GET    | `/api/events`                      | SSE stream of registry changes |
-| GET    | `/healthz`                         | Liveness for Cuthulu's own healthcheck |
+| POST   | `/api/services/{id}/start\|stop\|restart` | Returns the updated service |
+| GET    | `/api/services/{id}/logs`          | SSE log stream; `?tail=` (≤ 10 000), `?follow=` |
+| GET    | `/api/events`                      | SSE registry stream |
 
-Actions return the updated `Service`. Errors are JSON `{ "error": "...", "code": "..." }`.
+Errors: JSON `{ "error": "...", "code": "bad_request|forbidden|not_found|unavailable|internal" }`.
+
+### SSE events
+
+`/api/events`: `snapshot` `{services, status}` on connect, then `upsert`
+(service), `remove` (id), `status` (provider connection). A client that lags
+past the channel capacity gets `resync` and the stream ends; it reconnects and
+receives a fresh snapshot.
+
+`/api/services/{id}/logs`: `lines` (JSON array, lines batched in 50 ms windows,
+≤ 500 per event), `failure` (message), `end` (the container stopped writing).
+
+Every event carries non-empty `data` — browsers silently drop events whose
+data is empty.
 
 ## Logs
 
-- Docker logs are demultiplexed into stdout/stderr lines with timestamps.
-- Initial request sends the last `tail` lines (default 500), then follows.
-- The browser keeps a bounded ring buffer (e.g. 5 000 lines) and renders only
-  what is visible, so a chatty container cannot freeze the tab.
-- Server side, a slow client is dropped rather than buffered forever.
-
-## Scalability checklist
-
-- Event-driven updates, periodic reconcile, no per-service polling.
-- List endpoint supports filtering server-side.
-- UI: search, state filter, compose-project grouping, keyboard navigation;
-  long lists stay a plain dense table (no heavy per-row widgets).
-- Bounded buffers everywhere (broadcast channel, log streams, client ring buffer).
+- Docker log frames are reassembled into lines per stream (stdout/stderr),
+  timestamps split off, ANSI escapes stripped. A line longer than 16 KiB is
+  emitted in pieces instead of buffered forever.
+- The browser keeps at most 5 000 lines and never lets `EventSource`
+  auto-retry (that would replay history). When the container is running
+  again, the client reopens the stream itself.
+- Backpressure is natural: the SSE body is only polled as fast as the client
+  reads, which in turn slows the read from Docker.
 
 ## Self-awareness
 
-Cuthulu detects its own container (via `HOSTNAME` / cgroup id matched against
-container ids, or a `cuthulu.self=true` label) and marks it `is_self`. Stop is
-disabled for it; restart is allowed with a warning.
+Cuthulu marks its own container `is_self` when the container carries the
+`cuthulu.self=true` label (set by the image) or, inside a container, when its
+id starts with `$HOSTNAME`. Stop is refused for it (UI and API); restart is
+allowed after a confirmation.
 
 ## Configuration
 
-| Variable               | Default                        | Meaning |
-|------------------------|--------------------------------|---------|
-| `CUTHULU_BIND`         | `0.0.0.0:8686`                 | Listen address inside the container |
-| `CUTHULU_DOCKER_HOST`  | `unix:///var/run/docker.sock`  | Docker endpoint |
-| `CUTHULU_READ_ONLY`    | `false`                        | Hide/disable start/stop/restart |
-| `CUTHULU_AUTH_TOKEN`   | unset                          | If set, required as bearer token / login |
-| `CUTHULU_LOG_TAIL`     | `500`                          | Default lines of history per log view |
-| `CUTHULU_RECONCILE_SECS` | `30`                         | Full re-list interval |
-| `RUST_LOG`             | `info`                         | Tracing filter |
+| Variable                 | Default                        | Meaning |
+|--------------------------|--------------------------------|---------|
+| `CUTHULU_BIND`           | `127.0.0.1:8686` (image: `0.0.0.0:8686`) | Listen address |
+| `CUTHULU_DOCKER_HOST`    | `unix:///var/run/docker.sock`  | Docker endpoint (`unix://` or `tcp://`) |
+| `CUTHULU_READ_ONLY`      | `false`                        | Refuse start/stop/restart, hide the buttons |
+| `CUTHULU_LOG_TAIL`       | `500`                          | History lines per log view (max 10 000) |
+| `CUTHULU_RECONCILE_SECS` | `60`                           | Full re-list interval |
+| `RUST_LOG`               | `info`                         | Tracing filter |
+
+Planned: `CUTHULU_AUTH_TOKEN` (phase 5).
 
 ## Security
 
 Mounting `/var/run/docker.sock` gives the container **root-equivalent access
 to the host**. Therefore:
 
-- Publish the port on `127.0.0.1` only by default. Never expose it to a
-  network without `CUTHULU_AUTH_TOKEN` set and a TLS-terminating proxy.
-- State-changing endpoints are `POST` only and require a same-origin request
-  (check `Origin` / a custom header sent by htmx) to block CSRF from other
-  local sites.
+- Default bind is `127.0.0.1`; the compose file publishes on `127.0.0.1` only.
+- POSTs require the `X-Cuthulu: 1` header (a cross-site form cannot set it and
+  a cross-site `fetch` with it needs a CORS preflight that is never granted),
+  plus `Origin` must match `Host` and `Sec-Fetch-Site` must be same-origin
+  when the browser sends them.
+- Strict CSP (`default-src 'self'`, no inline script), `X-Frame-Options: DENY`,
+  `nosniff`, `no-referrer`.
 - `CUTHULU_READ_ONLY=true` for a pure viewer.
-- Never display env var *values* in the detail view by default (secrets live
-  there); show keys only, values behind an explicit reveal.
-
-## Planned source layout
-
-```
-src/
-  main.rs            entry: config, tracing, build router, serve
-  config.rs          CUTHULU_* env parsing
-  model.rs           Service, ServiceId, ServiceState, Action, …
-  registry.rs        in-memory state, reconcile loop, broadcast
-  providers/
-    mod.rs           Provider trait, ProviderKind
-    docker.rs        bollard-backed implementation
-  api/
-    mod.rs           router
-    services.rs      list/detail/actions
-    logs.rs          SSE log streaming
-    events.rs        SSE registry events
-  web/
-    mod.rs           page handlers
-templates/           askama templates
-static/              css, js, vendored htmx, fonts, favicon
-Dockerfile
-compose.yaml
-```
+- Env var values never leave the Docker provider.
+- The image runs as a non-root user (65532) from `scratch`.

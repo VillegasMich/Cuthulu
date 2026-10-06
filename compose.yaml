@@ -1,0 +1,17 @@
+# Run with:
+#   DOCKER_GID=$(stat -c %g /var/run/docker.sock) docker compose up -d
+services:
+  cuthulu:
+    build: .
+    image: villegasmich/cuthulu:latest
+    container_name: cuthulu
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8686:8686" # localhost only: the socket below is root-equivalent
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    group_add:
+      - "${DOCKER_GID:?set DOCKER_GID to the gid of /var/run/docker.sock}"
+    environment:
+      RUST_LOG: info
+      # CUTHULU_READ_ONLY: "true"

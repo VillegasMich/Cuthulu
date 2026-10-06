@@ -7,26 +7,25 @@ machine — Docker containers first — and lets you see their status, read thei
 logs and start / stop / restart them from one place. Cuthulu itself runs as a
 container.
 
-**Status:** early development. Nothing works yet; see the [roadmap](docs/ROADMAP.md).
+**Status:** early but usable — the dashboard, live updates, logs and
+start/stop/restart work. See the [roadmap](docs/ROADMAP.md).
 
-## Features (planned)
+## Features
 
 - Auto-discovers every container on the host, no configuration
 - Live state updates (event-driven, no polling)
 - Live log tailing with search and stderr highlighting
 - Start / stop / restart, with protection against stopping itself
 - Light and dark themes, keyboard driven, dense terminal-style UI
-- Scales from a handful to hundreds of services
-- Single static binary in a tiny image
+- Scales from a handful to hundreds of services (event-driven, no polling)
+- Single static binary in a `scratch` image
+- Read-only mode, CSRF protection, strict CSP
 
-## Quick start (once released)
+## Quick start
 
 ```sh
-docker run -d --name cuthulu --restart unless-stopped \
-  -p 127.0.0.1:8686:8686 \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  --group-add "$(stat -c %g /var/run/docker.sock)" \
-  villegasmich/cuthulu:latest
+git clone https://github.com/VillegasMich/cuthulu && cd cuthulu
+DOCKER_GID=$(stat -c %g /var/run/docker.sock) docker compose up -d --build
 ```
 
 Open <http://localhost:8686>.
@@ -37,10 +36,13 @@ Open <http://localhost:8686>.
 ## Development
 
 ```sh
-cargo run          # needs access to /var/run/docker.sock
+cargo run                                    # http://127.0.0.1:8686, needs access to /var/run/docker.sock
 cargo test
-cargo clippy -- -D warnings
+cargo clippy --all-targets -- -D warnings
 ```
+
+Keyboard: `/` filter · `j`/`k` move · `enter` open · `s` start/stop ·
+`r` restart · `t` theme · `?` help.
 
 ## Docs
 
