@@ -417,6 +417,33 @@ function initService() {
     node.classList.toggle("hide", needle !== "" && !node.dataset.lc.includes(needle));
   }
 
+  /** Class list for a style span (see LogSpan in ARCHITECTURE.md). */
+  function spanClass(s) {
+    const cls = [];
+    if (s.fg != null) cls.push(`a-f${s.fg}`);
+    if (s.bg != null) cls.push(`a-b${s.bg}`, s.fg == null ? "a-on" : null);
+    if (s.bold) cls.push("a-bold");
+    if (s.dim) cls.push("a-dim");
+    if (s.italic) cls.push("a-italic");
+    if (s.underline) cls.push("a-ul");
+    if (s.level) cls.push(`lv-${s.level}`);
+    return cls.filter(Boolean).join(" ");
+  }
+
+  /** Line text with ANSI/level spans; offsets are UTF-16, as String#slice. */
+  function logText(l) {
+    if (!l.spans?.length) return l.text;
+    const frag = document.createDocumentFragment();
+    let at = 0;
+    for (const s of l.spans) {
+      if (s.start > at) frag.append(l.text.slice(at, s.start));
+      frag.append(el("span", { class: spanClass(s) }, l.text.slice(s.start, s.end)));
+      at = s.end;
+    }
+    if (at < l.text.length) frag.append(l.text.slice(at));
+    return frag;
+  }
+
   function addLines(lines) {
     const frag = document.createDocumentFragment();
     for (const l of lines) {
@@ -424,7 +451,7 @@ function initService() {
         "div",
         { class: l.stream === "stderr" ? "ln e" : "ln" },
         l.ts ? el("span", { class: "ts", title: l.ts }, fmtTs(l.ts)) : null,
-        l.text,
+        logText(l),
       );
       node.dataset.lc = l.text.toLowerCase();
       applyFilter(node);
@@ -510,6 +537,7 @@ function initService() {
   };
   bindToggle($("#log-ts"), "logs.ts", "show-ts", false);
   bindToggle($("#log-wrap"), "logs.wrap", "wrap-lines", true);
+  bindToggle($("#log-color"), "logs.color", "colors", true);
 
   document.addEventListener("keydown", (e) => {
     if (e.ctrlKey || e.metaKey || e.altKey) return;
