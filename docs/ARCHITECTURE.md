@@ -11,8 +11,9 @@ this file in the same change when a decision moves.
                           ├── web       : HTML page shells + embedded static assets
                           ├── api       : JSON + Server-Sent Events
                           ├── registry  : in-memory view of all services
-                          └── providers
-                                └── docker ──unix socket──▶ /var/run/docker.sock
+                          ├── providers
+                          │     └── docker ──unix socket──▶ /var/run/docker.sock
+                          └── system    : host CPU/memory/network/disk ──▶ procfs (read-only)
 ```
 
 One process, one binary, no database. Docker is the source of truth; the
@@ -58,6 +59,7 @@ src/
     services.rs        list / detail / actions
     events.rs          SSE: registry changes
     logs.rs            SSE: log lines
+    system.rs          host snapshot + SSE stream
     guard.rs           CSRF / same-origin check for POSTs
     todos.rs           per-service TODO list / create / toggle / delete
     error.rs           ApiError → JSON { error, code }
@@ -67,6 +69,10 @@ src/
     lines.rs           log chunk → line splitting, timestamp parsing
     ansi.rs            ANSI SGR → style spans, other escapes stripped
     level.rs           level keyword detection (INFO, level=warn, …) for uncolored lines
+  system/
+    mod.rs             SystemMonitor: on-demand shared sampler, Snapshot, rates, addresses, top processes
+    proc.rs            pure parsers for /proc/stat, meminfo, loadavg, uptime, diskstats, net/{dev,route,fib_trie,if_inet6},
+                       [pid]/stat|status|cmdline, /etc/passwd
 templates/             base, index, service, not_found
 static/                app.css, app.js, theme.js, eye.svg, fonts/
 ```
@@ -155,6 +161,8 @@ services.
 | POST   | `/api/services/{id}/start\|stop\|restart` | Returns the updated service |
 | GET    | `/api/services/{id}/logs`          | SSE log stream; `?tail=` (≤ 10 000), `?follow=` |
 | GET    | `/api/events`                      | SSE registry stream |
+| GET    | `/api/system`                      | JSON host snapshot (CPU, memory, load, network, disk I/O, opt-in top processes); 503 if procfs is unreadable |
+| GET    | `/api/system/stream`               | SSE host snapshots, one per `CUTHULU_SYSTEM_SECS` |
 | GET    | `/api/services/{id}/todos`         | The service's TODO items, oldest first |
 | POST   | `/api/services/{id}/todos`         | Add an item, body `{"text": "..."}`; returns the list |
 | POST   | `/api/services/{id}/todos/{todo_id}/toggle` | Flip done; returns the list |
@@ -172,6 +180,10 @@ receives a fresh snapshot.
 `/api/services/{id}/logs`: `lines` (JSON array, lines batched in 50 ms windows,
 ≤ 500 per event), `failure` (message), `end` (the container stopped writing).
 
+`/api/system/stream`: `system` (snapshot JSON) every interval, the latest one
+replayed on connect when it is still fresh; `failure` (message) when procfs
+cannot be read — the stream stays open and recovers. Every event is a full
+snapshot, so a lagging client simply skips some (no `resync`).
 A log line is `{ts, stream, text, spans?}`. `text` is plain (escapes removed),
 so filtering works on it. `spans` is present only when part of the line is
 styled: sorted, non-overlapping `{start, end, fg?, bg?, bold?, dim?, italic?,
@@ -205,6 +217,74 @@ data is empty.
 - Backpressure is natural: the SSE body is only polled as fast as the client
   reads, which in turn slows the read from Docker.
 
+## Host system panel
+
+The dashboard's host panel is **not** a `Provider`: the host is not a service
+source and has no actions. `src/system/` reads procfs directly — no PTY, no
+`htop`/`ps`/`ip`/speedtest or any other binary, so it works in the `scratch`
+image.
+
+- **What is read:** `stat` (aggregate + per-core CPU ticks), `meminfo`
+  (used = `MemTotal − MemAvailable`, falling back to htop's
+  free/buffers/cache formula on old kernels), `loadavg` (load, runnable and
+  total threads), `uptime`, `diskstats`, `sys/kernel/hostname` (skipped
+  inside a Docker container, where it names the container), and the
+  network files below. The pid directories are only counted (`tasks`).
+- **Network:** `net/dev` (byte counters), `net/route` (the default route
+  picks the primary interface; the longest matching prefix maps each address
+  to its interface), `net/fib_trie` (the host's IPv4 addresses: its
+  `/32 host LOCAL` leaves) and `net/if_inet6` (global, non-temporary IPv6).
+  `<proc>/net` links to `self/net`, the *reader's* network namespace — in a
+  container that is the container's — so `<proc>/1/net` (pid 1, the host's
+  namespace) is read first, falling back to `<proc>/net`. Loopback and
+  container/VM plumbing (`docker*`, `br-*`, `veth*`, `virbr*`, `cni*`,
+  `flannel*`, `cali*`, `vxlan*`) are left out. Addresses without a
+  main-table route (e.g. a VPN using its own table) are listed without an
+  interface. Each address gets a `kind`: by interface name first
+  (`tailscale*`, `wg*`, `zt*`, `tun*`/`tap*`), then by range — private,
+  link-local and ULA are `local`; `100.64.0.0/10` is `cgnat` on the uplink
+  and `tailscale` elsewhere (Tailscale allocates from it), as is
+  `fd7a:115c:a1e0::/48`; anything else is `public`.
+- **Rates** (CPU%, network ↓/↑ and disk read/write) are deltas between two
+  reads over the time between them. "Network speed" is the *current
+  throughput* of the default-route interface, not a bandwidth test: that
+  would need an external server and generate traffic. Disk I/O sums whole
+  physical disks only (partitions, loop, ram, optical, `dm-*` and `md*` are
+  skipped so nothing counts twice). A one-off `GET /api/system` with no
+  recent baseline reads twice, 250 ms apart.
+- **Processes (opt-in, `CUTHULU_SYSTEM_PROCESSES`):** per pid `stat`
+  (utime+stime, start time) and `status` (uid, `VmRSS`); `cmdline` only for
+  the processes that make the top lists; uids named from `/etc/passwd` when
+  readable (read once at startup). Per-process CPU% is relative to one core
+  like htop, so it can exceed 100; processes are matched across reads by
+  pid *and* start time, so a reused pid never inherits another process's
+  ticks. The snapshot carries the union of the top 10 by CPU and the top 10
+  by RSS (≤ 20 rows) so the client can sort by either; `procs` is absent
+  from the JSON when disabled, and no per-pid file is read at all.
+- **Robustness:** pids that vanish mid-scan, or are hidden by `hidepid`, are
+  skipped. Unreadable network or disk files just leave `net` / `disk` null.
+  An unreadable proc dir (`stat`, `meminfo`, …) is an error (`503` /
+  `failure` event), not a crash.
+- **Cost:** one shared sampler task, started by the first subscriber and
+  stopped at the next tick after the last one leaves (the receiver count is
+  checked under the same lock that starts it, so no subscriber is ever left
+  without a sampler). Nobody watching = no sampling. Without processes a
+  tick reads about ten small files; the work runs on the blocking pool.
+- **Bounded:** broadcast capacity 4; ≤ 12 addresses; ≤ 20
+  processes per snapshot; command lines cut at 512 bytes.
+
+> **Decision (2026-10):** host updates use a dedicated
+> `/api/system/stream` instead of a new event on `/api/events`. Every page
+> holds `/api/events` open (the detail page too), so riding on it would
+> sample whenever any tab is open. A separate stream ties the sampler's
+> lifetime to the panel: the client opens it only while the panel is
+> expanded and the tab visible. Snapshots also need different lag handling
+> (skip, not resync).
+
+> **Decision (2026-10):** the process list is off by default
+> (`CUTHULU_SYSTEM_PROCESSES=true` enables it). The panel is for an
+> at-a-glance view of the machine; per-process detail is noise for most
+> users and the most expensive part of a sample.
 ## Service TODOs
 
 Each service has a small TODO list on its detail page.
@@ -245,6 +325,9 @@ allowed after a confirmation.
 | `CUTHULU_READ_ONLY`      | `false`                        | Refuse start/stop/restart, hide the buttons |
 | `CUTHULU_LOG_TAIL`       | `500`                          | History lines per log view (max 10 000) |
 | `CUTHULU_RECONCILE_SECS` | `60`                           | Full re-list interval |
+| `CUTHULU_PROC_DIR`       | `/proc` (compose: `/host/proc`) | procfs the host panel reads; mount the host's read-only in a container |
+| `CUTHULU_SYSTEM_SECS`    | `2`                            | Host panel sampling interval (1–60), only while someone watches |
+| `CUTHULU_SYSTEM_PROCESSES` | `false`                      | Also list the top processes (by CPU / memory) in the host panel |
 | `CUTHULU_DATA_DIR`       | `./data` (image: `/data`)      | Directory for `todos.json`; created on first write |
 | `RUST_LOG`               | `info`                         | Tracing filter |
 
@@ -266,3 +349,5 @@ to the host**. Therefore:
 - TODO text is user input: rendered with `textContent` only, length-bounded.
 - Env var values never leave the Docker provider.
 - The image runs as a non-root user (65532) from `scratch`.
+- The host's `/proc` (and optionally `/etc/passwd`) are mounted read-only;
+  the panel shows process command lines but never environments.

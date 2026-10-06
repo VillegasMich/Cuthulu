@@ -5,6 +5,7 @@ mod events;
 mod guard;
 mod logs;
 mod services;
+mod system;
 mod todos;
 
 use axum::Router;
@@ -26,6 +27,8 @@ pub fn router() -> Router<AppState> {
         .route("/services/{id}/todos/{todo_id}/toggle", post(todos::toggle))
         .route("/services/{id}/todos/{todo_id}/delete", post(todos::delete))
         .route("/events", get(events::stream))
+        .route("/system", get(system::snapshot))
+        .route("/system/stream", get(system::stream))
 }
 
 fn parse_id(raw: &str) -> Result<ServiceId, ApiError> {

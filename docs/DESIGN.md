@@ -92,6 +92,7 @@ stores an explicit choice in `localStorage` and sets `data-theme` on `<html>`.
     keeps its slot, so the eye never shifts between pages.
   - The theme toggle shows the *current* theme: a sun in light, a moon in dark
     (pure CSS, so it also follows `prefers-color-scheme` live).
+- Host panel (dashboard, above the toolbar): see below.
 - Toolbar (dashboard): filter input and a `show stopped` checkbox. Stopped
   services are hidden by default (only `running` / `restarting` / `paused`
   rows show); the counts keep the full totals and mark the hidden part. The
@@ -124,6 +125,52 @@ hand-written inline SVGs: 14px in a 24-unit viewBox, `fill: none`,
 buttons (`.btn.icon`) keep the box of a text `.btn`, are `--muted` until
 hover, and always carry `aria-label` + `title`.
 
+## Host panel
+
+An htop-style block at the top of the dashboard, inside one bordered
+`--surface` box. Collapsible (header button, `m`); the state is remembered
+in `localStorage` (`cuthulu.sys.open`), as is the process sort
+(`cuthulu.sys.mem`).
+
+```
+▾ host  my-box
+    0 [||||||      31.0%]    1 [||||        22.0%]   Load  1.12 0.98 0.80
+    2 [||           9.5%]    3 [|||||||     40.1%]   Tasks 312, 1708 threads; 2 running
+  Mem [||||||||||||||||||           5.8G/15.5G]      Up    3d 4h
+  Swp [|                             0.1G/2.0G]      Net   wlp2s0  ↓ 526K/s  ↑  34K/s
+                                                     IP    192.168.1.57      local
+                                                           100.115.90.103    tailscale
+                                                     Disk  read 106K/s  write 819K/s
+```
+
+- **Meters are text**: `[`, pipes, spaces, the value right-aligned at the
+  end, `]` — fixed character widths (26ch per CPU meter), like htop. The bar
+  scales to the room left of the widest value, so its scale never shifts.
+  The value is always shown; color is never the only signal. Meters carry
+  `role="meter"` with the value as `aria-valuetext`.
+- Pipes are colored by **zone**, using the existing tokens: each pipe takes
+  `--ok` below the warn threshold, `--warn` up to the error threshold, then
+  `--err`, so a fuller bar runs green → yellow → red and its tip shows the
+  level. Thresholds: CPU 70 / 90 %, Mem 75 / 90 %, Swp 50 / 80 %; the
+  1-minute load number uses load ÷ cores at 70 / 100 %. Labels and brackets
+  are `--muted`.
+- CPU meters use enough columns to stay about four rows tall (2 columns for
+  ≤ 8 cores, up to 8); Mem/Swp span the CPU block's width. Below 600px one
+  column.
+- Info column: a label / value list (`dt` in `--muted`). Rates are padded
+  to a fixed width so the line does not jitter; the network tooltip gives
+  Mbit/s. `↓` / `↑` are plain text glyphs.
+- Addresses: one per row, the default-route interface's first, each with a
+  `--muted` kind label in an aligned column (`local`, `public`, `cgnat`,
+  `tailscale`, `wireguard`, `zerotier`, `vpn`); the interface is in the
+  tooltip.
+- Process table (only with `CUTHULU_SYSTEM_PROCESSES=true`): top 10,
+  sortable by `cpu%` or `mem%` (header buttons, the active one marked `▾`
+  and `aria-sort`). Command in `--muted`, ellipsized, full text in the
+  tooltip. CPU% is per core (can exceed 100). Below 600px it drops user and
+  res.
+- No new color tokens.
+
 ## Keyboard shortcuts
 
 | Key        | Action |
@@ -134,6 +181,7 @@ hover, and always carry `aria-label` + `title`.
 | `l`        | open logs of selected service |
 | `s`        | start / stop selected (stop asks for confirmation) |
 | `r`        | restart selected |
+| `m`        | collapse / expand the host panel (dashboard) |
 | `a`        | show / hide stopped services |
 | `t`        | toggle theme |
 | `Esc`      | back (same as the back arrow) / close / clear filter / clear selection |

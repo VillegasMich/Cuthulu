@@ -586,6 +586,217 @@ function initService() {
   open();
 }
 
+// ── host panel (fed by /api/system/stream) ─────────────────
+
+/** htop-style sizes: 512K, 840M, 5.8G. */
+function fmtBytes(b) {
+  const K = 1024, M = K * K, G = M * K;
+  if (b >= G) return `${(b / G).toFixed(1)}G`;
+  if (b >= M) return `${Math.round(b / M)}M`;
+  return `${Math.round(b / K)}K`;
+}
+
+/** ok / warn / err for a percentage; thresholds are in docs/DESIGN.md. */
+const level = (pct, warn, err) => (pct >= err ? "err" : pct >= warn ? "warn" : "ok");
+
+const METER_W = 26; // ch per CPU meter: label 4 + "[" + bar 20 + "]"
+const SYS_TOP = 10; // processes listed (the server sends the top 10 by CPU and by memory)
+
+/** Bytes per second, padded so the line does not jitter: "  1.2M/s". */
+const fmtRate = (b) => `${b < 1024 ? `${b}B` : fmtBytes(b)}/s`.padStart(7);
+
+/** Network speed the way ISPs quote it, for tooltips. */
+const fmtBits = (b) => `${((b * 8) / 1e6).toFixed(2)} Mbit/s`;
+const METER_GAP = 2; // ch between meter columns
+
+/**
+ * One text meter, `lbl[|||||||     text]`, like htop: `width` characters of
+ * pipes and spaces with the value right-aligned at the end. The bar scales
+ * to the room left of the value, and each pipe takes the color of the zone
+ * it falls in (ok below `warn`%, warn below `err`%, err above), so a fuller
+ * bar runs green → yellow → red.
+ */
+function meter(label, pct, text, width, [warn, err]) {
+  const p = Math.max(0, Math.min(100, pct));
+  // Reserve room for the widest value ("100.0%") plus a space, so the bar's
+  // scale does not shift as the number changes width.
+  const room = Math.max(0, width - Math.max(text.length, 6) - 1);
+  const pipes = Math.round((p / 100) * room);
+  const zone = (i) => level(((i + 1) / room) * 100, warn, err);
+  const segs = [];
+  for (let i = 0; i < pipes; i++) {
+    const z = zone(i);
+    if (segs.length && segs[segs.length - 1].z === z) segs[segs.length - 1].n++;
+    else segs.push({ z, n: 1 });
+  }
+  return el(
+    "div",
+    {
+      class: "meter",
+      role: "meter",
+      "aria-label": label.trim(),
+      "aria-valuemin": "0",
+      "aria-valuemax": "100",
+      "aria-valuenow": String(Math.round(p)),
+      "aria-valuetext": text,
+    },
+    el("span", { class: "lbl" }, label),
+    el("span", { class: "br" }, "["),
+    ...segs.map((g) => el("span", { class: `fill ${g.z}` }, "|".repeat(g.n))),
+    " ".repeat(width - pipes - text.length),
+    el("span", { class: "val" }, text),
+    el("span", { class: "br" }, "]"),
+  );
+}
+
+function initSystem() {
+  const root = $("#sys");
+  if (!root) return;
+  const toggle = $("#sys-toggle");
+  const stateEl = $("#sys-state");
+  const narrow = matchMedia("(max-width: 600px)");
+  let open = pref("sys.open", true);
+  let byMem = pref("sys.mem", false);
+  let es = null;
+  let snap = null;
+  let problem = "";
+
+  function draw() {
+    fill(stateEl, problem ? el("span", { class: "err" }, problem) : null);
+    if (!snap) return;
+    const s = snap;
+    $("#sys-host").textContent = s.hostname || "";
+
+    // Enough columns that the CPU block stays about four rows tall.
+    const n = s.cpus.length;
+    const cols = narrow.matches ? 1 : Math.min(8, Math.max(2, Math.ceil(n / 4)));
+    const cpus = $("#sys-cpus");
+    cpus.style.gridTemplateColumns = `repeat(${Math.min(cols, n || 1)}, ${METER_W}ch)`;
+    cpus.replaceChildren(
+      ...s.cpus.map((pct, i) =>
+        meter(String(i).padStart(3) + " ", pct, `${pct.toFixed(1)}%`, METER_W - 6, [70, 90]),
+      ),
+    );
+
+    // Memory meters span the CPU block's full width.
+    const span = Math.min(cols, n || 1);
+    const wide = span * METER_W + (span - 1) * METER_GAP - 6;
+    const usage = (label, u, warn, err) => {
+      const pct = u.total ? (u.used / u.total) * 100 : 0;
+      return meter(label, pct, `${fmtBytes(u.used)}/${fmtBytes(u.total)}`, wide, [warn, err]);
+    };
+    fill($("#sys-mem"), usage("Mem ", s.mem, 75, 90), usage("Swp ", s.swap, 50, 80));
+
+    const ncpu = n || 1;
+    const rows = [
+      ["Load", [
+        el("span", { class: `lv-${level((s.load[0] / ncpu) * 100, 70, 100)}` }, s.load[0].toFixed(2)),
+        ` ${s.load[1].toFixed(2)} ${s.load[2].toFixed(2)}`,
+      ]],
+      ["Tasks", [`${s.tasks}, ${s.threads} threads; ${s.running} running`]],
+      ["Up", [fmtDur(s.uptime_secs * 1000)]],
+    ];
+    if (s.net) {
+      const net = s.net;
+      rows.push(["Net", [
+        net.iface ? `${net.iface}  ` : "",
+        el("span", { title: `download ${fmtBits(net.rx)}` }, `↓ ${fmtRate(net.rx)}`),
+        "  ",
+        el("span", { title: `upload ${fmtBits(net.tx)}` }, `↑ ${fmtRate(net.tx)}`),
+      ]]);
+      if (net.addrs.length) {
+        const addrs = net.addrs.flatMap((a) => [
+          el("span", { title: a.iface ? `on ${a.iface}` : "" }, a.ip),
+          el("span", { class: "kind", title: a.iface ? `on ${a.iface}` : "" }, a.kind),
+        ]);
+        rows.push(["IP", [el("span", { class: "addrs" }, ...addrs)]]);
+      }
+    }
+    if (s.disk) {
+      rows.push(["Disk", [`read ${fmtRate(s.disk.read)}  write ${fmtRate(s.disk.write)}`]]);
+    }
+    fill($("#sys-info"), ...rows.flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, ...v)]));
+
+    $("#sys-procs-box").hidden = !s.procs;
+    if (!s.procs) return;
+
+    for (const th of root.querySelectorAll("th[data-sort]")) {
+      const on = (th.dataset.sort === "mem") === byMem;
+      th.setAttribute("aria-sort", on ? "descending" : "none");
+    }
+    const key = byMem ? (p) => p.rss : (p) => p.cpu;
+    const procs = [...s.procs].sort((a, b) => key(b) - key(a) || a.pid - b.pid).slice(0, SYS_TOP);
+    const procRows = procs.map((p) =>
+      el(
+        "tr",
+        {},
+        el("td", { class: "p-pid num" }, String(p.pid)),
+        el("td", { class: "p-user", title: `uid ${p.uid}` }, p.user || String(p.uid)),
+        el("td", { class: "p-cpu num" }, p.cpu.toFixed(1)),
+        el("td", { class: "p-mem num" }, p.mem.toFixed(1)),
+        el("td", { class: "p-res num" }, fmtBytes(p.rss)),
+        el("td", { class: "p-cmd", title: p.cmd }, p.cmd),
+      ),
+    );
+    const body = $("#sys-procs");
+    if (procRows.length) body.replaceChildren(...procRows);
+    else body.replaceChildren(el("tr", { class: "placeholder" }, el("td", { colspan: "6" }, "no processes visible")));
+  }
+
+  // The stream is open only while the panel is expanded and the tab is
+  // visible; the server samples only while some stream is open.
+  function sync() {
+    const want = open && document.visibilityState === "visible";
+    if (want && !es) {
+      es = new EventSource("/api/system/stream");
+      es.addEventListener("system", (e) => {
+        snap = JSON.parse(e.data);
+        problem = "";
+        draw();
+      });
+      es.addEventListener("failure", (e) => {
+        problem = `unavailable: ${e.data}`;
+        draw();
+      });
+      // The browser reconnects on its own; every event is a full snapshot.
+      es.onerror = () => {
+        problem = "reconnecting…";
+        draw();
+      };
+    } else if (!want && es) {
+      es.close();
+      es = null;
+    }
+  }
+
+  function setOpen(on) {
+    open = on;
+    root.dataset.open = String(on);
+    toggle.setAttribute("aria-expanded", String(on));
+    $("#sys-body").hidden = !on;
+    setPref("sys.open", on);
+    sync();
+  }
+
+  toggle.addEventListener("click", () => setOpen(!open));
+  for (const b of root.querySelectorAll("button.sort")) {
+    b.addEventListener("click", () => {
+      byMem = b.dataset.sort === "mem";
+      setPref("sys.mem", byMem);
+      draw();
+    });
+  }
+  document.addEventListener("visibilitychange", sync);
+  narrow.addEventListener("change", draw);
+  document.addEventListener("keydown", (e) => {
+    if (e.ctrlKey || e.metaKey || e.altKey || typing(e)) return;
+    if (e.key === "m") setOpen(!open);
+  });
+
+  setOpen(open);
+  draw();
+}
+
 // ── service todos ──────────────────────────────────────────
 
 function initTodos() {
@@ -717,6 +928,7 @@ document.addEventListener("keydown", (e) => {
 });
 
 if (page === "index") initIndex();
+if (page === "index") initSystem();
 if (page === "service") initService();
 connect();
 setInterval(changed, 10_000);

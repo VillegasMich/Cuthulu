@@ -16,6 +16,9 @@ start/stop/restart work. See the [roadmap](docs/ROADMAP.md).
 - Live state updates (event-driven, no polling)
 - Live log tailing with search and stderr highlighting
 - Start / stop / restart, with protection against stopping itself
+- htop-style host panel: per-core CPU, memory, swap, load, IP addresses,
+  network and disk throughput (optionally top processes), read straight from
+  `/proc` and sampled only while someone is watching
 - Per-service TODO notes, kept in one JSON file (no database)
 - Light and dark themes, keyboard driven, dense terminal-style UI
 - Scales from a handful to hundreds of services (event-driven, no polling)
@@ -43,7 +46,7 @@ cargo clippy --all-targets -- -D warnings
 ```
 
 Keyboard: `/` filter · `j`/`k` move · `enter` open · `s` start/stop ·
-`r` restart · `a` show stopped · `t` theme · `esc` back · `?` help.
+`r` restart · `a` show stopped · `m` host panel · `t` theme · `esc` back · `?` help.
 
 ## Docs
 

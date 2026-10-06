@@ -37,8 +37,9 @@ up, what is down, and what each service is saying.
 
 - Not a replacement for Portainer: no image management, volume management,
   network editing, or container creation.
-- Not a metrics/alerting stack (Prometheus/Grafana). Basic CPU/memory may come
-  later, long-term time series will not.
+- Not a metrics/alerting stack (Prometheus/Grafana). A live, htop-style host
+  CPU/memory panel exists and per-service CPU/memory may come later;
+  long-term time series will not.
 - Not multi-user. One trusted operator on their own machine.
 - Not multi-host (yet). One machine, one Docker daemon.
 
@@ -62,6 +63,7 @@ their own Linux workstation or home server.
 | 9 | see CPU / memory usage per service                             | Next  |
 | 10| monitor non-Docker services (systemd units, plain processes)   | Later |
 | 11| get a desktop notification when a service dies                 | Later |
+| 12| see host CPU / memory / network at a glance                    | Done  |
 
 ## Success criteria for the MVP
 

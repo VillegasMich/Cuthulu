@@ -113,6 +113,7 @@ mod tests {
     use crate::registry::tests::{MockProvider, service};
     use crate::registry::{Registry, RegistryEvent};
     use crate::server::{AppState, router};
+    use crate::system::SystemMonitor;
     use crate::todos::tests::TempDir;
     use crate::todos::{MAX_TODO_CHARS, TodoStore};
 
@@ -131,12 +132,14 @@ mod tests {
         registry.spawn(std::time::Duration::from_secs(3600), &shutdown);
         while !matches!(sub.recv().await, Ok(RegistryEvent::Status(_))) {}
 
+        let config = Config {
+            read_only,
+            ..Config::default()
+        };
         router(AppState {
             registry,
-            config: Arc::new(Config {
-                read_only,
-                ..Config::default()
-            }),
+            system: SystemMonitor::new(&config, shutdown.clone()),
+            config: Arc::new(config),
             todos: Arc::new(TodoStore::open(todo_dir)),
             shutdown,
         })

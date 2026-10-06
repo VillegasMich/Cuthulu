@@ -11,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::Config;
 use crate::registry::Registry;
+use crate::system::SystemMonitor;
 use crate::todos::TodoStore;
 use crate::{api, web};
 
@@ -20,6 +21,8 @@ pub struct AppState {
     pub config: Arc<Config>,
     /// Fires on shutdown so long-lived streams end and the server can exit.
     pub shutdown: CancellationToken,
+    /// Host CPU/memory sampler for the dashboard's system panel.
+    pub system: Arc<SystemMonitor>,
     /// Per-service TODO items (`CUTHULU_DATA_DIR/todos.json`).
     pub todos: Arc<TodoStore>,
 }
@@ -87,10 +90,12 @@ mod tests {
             read_only,
             ..Config::default()
         };
+        let system = SystemMonitor::new(&config, shutdown.clone());
         let app = router(AppState {
             registry: Arc::clone(&registry),
             config: Arc::new(config),
             shutdown,
+            system,
             todos: Arc::new(TodoStore::open(std::path::Path::new(
                 "/nonexistent/cuthulu",
             ))),
@@ -268,5 +273,88 @@ mod tests {
         let text = String::from_utf8_lossy(&frame);
         assert!(text.starts_with("event: snapshot\n"), "{text}");
         assert!(text.contains("\"name\":\"web\""));
+    }
+
+    fn app_with_proc(dir: &std::path::Path) -> (Router, Arc<SystemMonitor>) {
+        let shutdown = CancellationToken::new();
+        let system = crate::system::tests::monitor(dir, 50, true, shutdown.clone());
+        let app = router(AppState {
+            registry: Registry::new(vec![]),
+            config: Arc::new(Config::default()),
+            shutdown,
+            system: Arc::clone(&system),
+            todos: Arc::new(TodoStore::open(std::path::Path::new(
+                "/nonexistent/cuthulu",
+            ))),
+        });
+        (app, system)
+    }
+
+    #[tokio::test]
+    async fn system_snapshot_from_proc_dir() {
+        let fake = crate::system::tests::FakeProc::new();
+        let (app, _) = app_with_proc(&fake.0);
+        let (status, headers, body) = send(&app, get("/api/system")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(headers[header::CONTENT_TYPE], "application/json");
+        let snap: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(snap["hostname"], "box");
+        assert_eq!(snap["cpus"].as_array().unwrap().len(), 2);
+        assert_eq!(snap["mem"]["total"], 1_024_000);
+        assert_eq!(snap["load"][0], 0.5);
+        assert_eq!(snap["net"]["iface"], "eth0");
+        assert_eq!(snap["net"]["addrs"][0]["ip"], "192.168.1.57");
+        assert_eq!(snap["net"]["addrs"][0]["kind"], "local");
+        assert!(snap["disk"]["read"].is_u64());
+        assert!(
+            snap["procs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["cmd"] == "/sbin/init")
+        );
+    }
+
+    #[tokio::test]
+    async fn system_unavailable_without_proc() {
+        let (app, _) = app_with_proc(std::path::Path::new("/nonexistent/cuthulu"));
+        let (status, _, body) = send(&app, get("/api/system")).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(body.contains("\"code\":\"unavailable\""), "{body}");
+
+        // The stream reports the failure as an event instead of closing.
+        let res = app.oneshot(get("/api/system/stream")).await.unwrap();
+        let mut body = res.into_body();
+        let frame = body.frame().await.unwrap().unwrap().into_data().unwrap();
+        let text = String::from_utf8_lossy(&frame);
+        assert!(
+            text.starts_with("event: failure\ndata: cannot read"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn system_stream_samples_only_while_open() {
+        let fake = crate::system::tests::FakeProc::new();
+        let (app, system) = app_with_proc(&fake.0);
+        assert!(!system.is_sampling());
+
+        let res = app.oneshot(get("/api/system/stream")).await.unwrap();
+        assert_eq!(res.headers()[header::CONTENT_TYPE], "text/event-stream");
+        assert!(system.is_sampling());
+        let mut body = res.into_body();
+        let frame = body.frame().await.unwrap().unwrap().into_data().unwrap();
+        let text = String::from_utf8_lossy(&frame);
+        assert!(text.starts_with("event: system\ndata: {"), "{text}");
+        assert!(text.contains("\"hostname\":\"box\""));
+
+        drop(body);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while system.is_sampling() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("closing the last stream stops the sampler");
     }
 }

@@ -6,6 +6,8 @@ use std::time::Duration;
 
 /// Hard upper bound for log history requested per stream.
 pub const MAX_LOG_TAIL: usize = 10_000;
+/// Bounds for the host panel's sampling interval, in seconds.
+pub const SYSTEM_SECS: std::ops::RangeInclusive<u64> = 1..=60;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -19,6 +21,12 @@ pub struct Config {
     pub log_tail: usize,
     /// Interval of the full re-list that heals missed events.
     pub reconcile_interval: Duration,
+    /// Where the host's procfs is mounted (`/host/proc` in the container).
+    pub proc_dir: PathBuf,
+    /// Host panel sampling interval while someone is watching.
+    pub system_interval: Duration,
+    /// Also list the busiest processes in the host panel.
+    pub system_processes: bool,
     /// Directory for state Cuthulu owns (`todos.json`).
     pub data_dir: PathBuf,
 }
@@ -39,6 +47,9 @@ impl Default for Config {
             read_only: false,
             log_tail: 500,
             reconcile_interval: Duration::from_secs(60),
+            proc_dir: PathBuf::from("/proc"),
+            system_interval: Duration::from_secs(2),
+            system_processes: false,
             data_dir: PathBuf::from("data"),
         }
     }
@@ -96,6 +107,27 @@ impl Config {
                     Ok(n) => Ok(Duration::from_secs(n)),
                     Err(e) => Err(e.to_string()),
                 },
+            )?,
+            proc_dir: get("CUTHULU_PROC_DIR").map_or(d.proc_dir, PathBuf::from),
+            system_interval: parse(
+                get("CUTHULU_SYSTEM_SECS"),
+                "CUTHULU_SYSTEM_SECS",
+                d.system_interval,
+                |v| match v.parse::<u64>() {
+                    Ok(n) if SYSTEM_SECS.contains(&n) => Ok(Duration::from_secs(n)),
+                    Ok(_) => Err(format!(
+                        "must be between {} and {}",
+                        SYSTEM_SECS.start(),
+                        SYSTEM_SECS.end()
+                    )),
+                    Err(e) => Err(e.to_string()),
+                },
+            )?,
+            system_processes: parse(
+                get("CUTHULU_SYSTEM_PROCESSES"),
+                "CUTHULU_SYSTEM_PROCESSES",
+                d.system_processes,
+                parse_bool,
             )?,
             data_dir: get("CUTHULU_DATA_DIR").map_or(d.data_dir, PathBuf::from),
         })
@@ -175,5 +207,22 @@ mod tests {
     #[test]
     fn empty_values_mean_default() {
         assert_eq!(from(&[("CUTHULU_BIND", "  ")]).unwrap(), Config::default());
+    }
+
+    #[test]
+    fn host_panel_settings() {
+        let c = from(&[
+            ("CUTHULU_PROC_DIR", "/host/proc"),
+            ("CUTHULU_SYSTEM_SECS", "5"),
+            ("CUTHULU_SYSTEM_PROCESSES", "true"),
+        ])
+        .unwrap();
+        assert!(c.system_processes);
+        assert!(!Config::default().system_processes, "off by default");
+        assert_eq!(c.proc_dir, PathBuf::from("/host/proc"));
+        assert_eq!(c.system_interval, Duration::from_secs(5));
+        assert!(from(&[("CUTHULU_SYSTEM_SECS", "0")]).is_err());
+        assert!(from(&[("CUTHULU_SYSTEM_SECS", "61")]).is_err());
+        assert!(from(&[("CUTHULU_SYSTEM_SECS", "x")]).is_err());
     }
 }

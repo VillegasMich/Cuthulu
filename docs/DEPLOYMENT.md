@@ -17,11 +17,17 @@ services:
       - "127.0.0.1:8686:8686" # localhost only: the socket below is root-equivalent
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      # Host panel (CPU, memory, processes): the host's procfs, read-only.
+      - /proc:/host/proc:ro
+      # Only with CUTHULU_SYSTEM_PROCESSES: resolve process uids to user names.
+      # - /etc/passwd:/etc/passwd:ro
       - cuthulu-data:/data # todos.json; a named volume keeps the image's 65532 owner
     group_add:
       - "${DOCKER_GID:?set DOCKER_GID to the gid of /var/run/docker.sock}"
     environment:
       RUST_LOG: info
+      CUTHULU_PROC_DIR: /host/proc
+      # CUTHULU_SYSTEM_PROCESSES: "true"
       # CUTHULU_READ_ONLY: "true"
 
 volumes:
@@ -44,11 +50,34 @@ docker build -t cuthulu .
 docker run -d --name cuthulu --restart unless-stopped \
   -p 127.0.0.1:8686:8686 \
   -v /var/run/docker.sock:/var/run/docker.sock \
+  -v /proc:/host/proc:ro -e CUTHULU_PROC_DIR=/host/proc \
   -v cuthulu-data:/data \
   --group-add "$(stat -c %g /var/run/docker.sock)" \
   cuthulu
 ```
 
+## Host panel
+
+The dashboard's host panel (per-core CPU, memory, swap, load, network
+throughput and addresses, disk I/O, and optionally the top processes) reads
+procfs directly — no `htop`, shell or other binary is involved, so it works
+in the `scratch` image. Inside a container `/proc` describes the container
+(its processes, its network namespace), hence the host's procfs is
+bind-mounted read-only at `/host/proc` and `CUTHULU_PROC_DIR` points there.
+Network data is read through `/host/proc/1/net`, the host's namespace.
+
+- Without that mount CPU, memory, load and disk I/O are still host-wide
+  (those files are not namespaced), but network shows the container's own
+  interface.
+- The process list is off by default; set `CUTHULU_SYSTEM_PROCESSES=true` to
+  show it. `/etc/passwd` is then optional: mount the host's read-only to see
+  user names instead of uids.
+- If the host mounts `/proc` with `hidepid=`, processes of other users are
+  skipped; the rest of the panel is unaffected.
+- Sampling (every `CUTHULU_SYSTEM_SECS`, default 2) happens only while a
+  browser has the panel open and visible.
+- "Network speed" is the current throughput of the default-route
+  interface. Cuthulu never runs a bandwidth test or contacts the internet.
 ## Data
 
 Cuthulu keeps one file of its own: `todos.json` (per-service TODOs) in

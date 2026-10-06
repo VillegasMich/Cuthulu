@@ -45,6 +45,13 @@ Each phase should end in something runnable. Tick items as they land.
 - [ ] Download logs
 - [x] Per-service TODO list on the detail page (`CUTHULU_DATA_DIR/todos.json`)
 
+## Host panel ✓
+- [x] Read host CPU, memory, swap, load, uptime, network (addresses, ↓/↑ throughput) and disk I/O from procfs (`src/system/`, no external binaries)
+- [x] `GET /api/system` + `/api/system/stream`, one shared sampler that runs only while watched
+- [x] htop-style panel above the services table: per-core meters, info column, collapsible (`m`)
+- [x] Top processes by CPU / memory, opt-in via `CUTHULU_SYSTEM_PROCESSES`
+- [x] `CUTHULU_PROC_DIR`, `CUTHULU_SYSTEM_SECS`; compose mounts the host's `/proc` read-only
+
 ## Later
 - CPU / memory stats per service (on demand, only for visible rows)
 - systemd provider
