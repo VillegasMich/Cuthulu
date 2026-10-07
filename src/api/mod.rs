@@ -3,6 +3,7 @@
 mod error;
 mod events;
 mod guard;
+mod healthcheck;
 mod logs;
 mod notify;
 mod services;
@@ -32,6 +33,7 @@ pub fn router() -> Router<AppState> {
         .route("/services/{id}/notify", post(notify::set_watch))
         .route("/notify", get(notify::state).post(notify::set_enabled))
         .route("/notify/test", post(notify::test))
+        .route("/healthcheck", get(healthcheck::status))
         .route("/events", get(events::stream))
         .route("/system", get(system::snapshot))
         .route("/system/stream", get(system::stream))

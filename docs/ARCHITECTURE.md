@@ -72,7 +72,7 @@ src/
     mod.rs             Notifier: alert loop on the registry broadcast, email outbox, shutdown email
     alerts.rs          pure down/up state machine: settle, cooldown, operator actions
     mail.rs            Mailer trait, SMTP (lettre), email texts
-    heartbeat.rs       healthcheck pings (ureq)
+    heartbeat.rs       healthcheck pings (ureq), latest attempt for the topbar, error redaction
     store.rs           watched services + global switch: notify.json, atomic writes
   tailscale.rs         tailscaled LocalAPI status → admin console link (cached, on demand)
   api/
@@ -84,6 +84,7 @@ src/
     guard.rs           CSRF / same-origin check for POSTs
     todos.rs           per-service TODO list / create / toggle / delete
     notify.rs          notification settings, watch toggle, test
+    healthcheck.rs     heartbeat status + dashboard link for the topbar
     tailscale.rs       link to this machine in the Tailscale admin console
     version.rs         running build (version, commit)
     error.rs           ApiError → JSON { error, code }
@@ -195,6 +196,7 @@ services.
 | POST   | `/api/notify`                      | Global alert switch, body `{"enabled": bool}`; returns the state |
 | POST   | `/api/services/{id}/notify`        | Watch / unwatch, body `{"watch": bool}`; returns the state |
 | POST   | `/api/notify/test`                 | Send a test email and one ping now; `{email, healthcheck}` each `{status: sent\|off\|failed, error?}` |
+| GET    | `/api/healthcheck`                 | `{available, url, state: ok\|failed\|skipped\|pending\|off, last_ping_at, error}` for the topbar's healthchecks.io link; `url` is the dashboard, never the ping URL; always 200 |
 | GET    | `/api/tailscale`                   | `{available, url, tailnet, host, ip}` for the topbar's Tailscale admin link; always 200 |
 | GET    | `/api/version`                     | `{"version": "0.1.0", "git_sha": "<full sha>" \| null}` |
 
@@ -421,9 +423,24 @@ a `CUTHULU_` prefix, same TLS rules, same heartbeat semantics).
   shutdown email says it was deliberate. A `200 OK (not found)` answer (an
   unknown check) counts as a failure. Failures are logged once, then again
   when pings recover.
+- **Topbar button:** with `CUTHULU_HEALTHCHECK_URL` set, a pulse-line icon
+  links to the healthchecks.io dashboard (`https://healthchecks.io/`, or
+  `CUTHULU_HEALTHCHECK_LINK`) — not the check's own page, whose address
+  holds the ping UUID. Its tooltip comes from Cuthulu's own latest attempt
+  (heartbeat or test ping), kept in memory, latest only: `last ping ok 2m
+  ago`, `last ping failed 30s ago: <error>`, `ping skipped …` (a provider is
+  disconnected), `no ping yet`, or `pings off` (`CUTHULU_NOTIFY_ENABLED=false`).
+  Failed and skipped tint the icon with `--err`: either way healthchecks.io
+  will report Cuthulu down. No call to the healthchecks.io API is made. The
+  page fetches `GET /api/healthcheck` on load, when it becomes visible and
+  at most once a minute while visible; "2m ago" is computed client-side.
+  `CUTHULU_HEALTHCHECK_LINK` without a ping URL is accepted but has no
+  effect, and a warning says so at startup and every hour.
 - **Secrets:** the SMTP password and the ping URL are wrapped in a type whose
   `Debug` prints `[redacted]`; config errors never echo them; the API only
-  says whether each channel is configured.
+  says whether each channel is configured. Ping errors are scrubbed of the
+  URL, its path and long path segments (UUID, ping key) and cut to 160
+  characters before they are logged, stored or returned.
 
 > **Decision (2026-10):** stops requested through Cuthulu's own buttons are
 > *labelled*, not suppressed (first shipped suppressed; changed after testing
@@ -510,6 +527,7 @@ context, so containers get their settings from Compose as before.
 | `CUTHULU_NOTIFY_HOST`    | host name (outside a container), else `cuthulu` | Machine name in email subjects |
 | `CUTHULU_HEALTHCHECK_URL` | —                             | Ping URL, e.g. `https://hc-ping.com/<uuid>`; secret |
 | `CUTHULU_HEALTHCHECK_INTERVAL_MINUTES` | `5`              | Ping interval (1–1440) |
+| `CUTHULU_HEALTHCHECK_LINK` | `https://healthchecks.io/`   | http(s) URL the topbar's healthchecks.io button opens (a project or check page, a self-hosted instance); not secret. Without `CUTHULU_HEALTHCHECK_URL` it has no effect and is warned about hourly |
 | `CUTHULU_TAILSCALE_SOCKET` | `/var/run/tailscale/tailscaled.sock` | tailscaled LocalAPI socket for the topbar's admin console link; set empty to disable |
 | `CUTHULU_TAILSCALE_URL`  | unset                          | Explicit http(s) URL for the Tailscale button; shown even without the socket |
 | `RUST_LOG`               | `info`                         | Tracing filter |
@@ -538,7 +556,8 @@ to the host**. Therefore:
 - TODO text is user input: rendered with `textContent` only, length-bounded.
 - Env var values never leave the Docker provider.
 - Notification secrets (SMTP password, ping URL) are never logged, echoed in
-  config errors or returned by the API. Unencrypted SMTP is refused unless
+  config errors or returned by the API (`/api/healthcheck` returns the
+  dashboard link and a redacted error only). Unencrypted SMTP is refused unless
   the server is on localhost.
 - The image runs as a non-root user (65532) from `scratch`.
 - The host's `/proc` (and optionally `/etc/passwd`) are mounted read-only;

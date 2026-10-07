@@ -117,6 +117,12 @@ stores an explicit choice in `localStorage` and sets `data-theme` on `<html>`.
     machine in the Tailscale admin console in a new tab. The tooltip names
     host, IP and tailnet. Hidden (not reserved) when unavailable. No brand
     logo.
+  - healthchecks.io (left of Tailscale, only when `CUTHULU_HEALTHCHECK_URL`
+    is set): a `.btn.icon` link with a pulse-line glyph; opens the
+    healthchecks.io dashboard in a new tab. The tooltip states the last
+    ping (`healthchecks.io: last ping ok 2m ago`, `… failed 30s ago: <error>`,
+    `… no ping yet`, `… pings off`); the icon is `--err` (class `bad`) when
+    the last ping failed or was skipped, `--muted` otherwise. No brand logo.
 - Host panel (dashboard, above the toolbar): see below.
 - Toolbar (dashboard): filter input and a `show stopped` checkbox. Stopped
   services are hidden by default (only `running` / `restarting` / `paused`
@@ -209,7 +215,7 @@ room. One component (`.split`, `splitter()` in `app.js`), used in three places:
 ## Icons
 
 Text labels win by default. The few icons (the eye, back arrow, sun/moon,
-bell, the Tailscale network glyph) are hand-written inline SVGs: 14px
+bell, the Tailscale network glyph, the healthchecks.io pulse line) are hand-written inline SVGs: 14px
 in a 24-unit viewBox, `fill: none`, `stroke: currentColor`, round
 caps/joins, no fills except the pupil. Icon
 buttons (`.btn.icon`) keep the box of a text `.btn`, are `--muted` until
