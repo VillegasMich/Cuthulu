@@ -75,6 +75,7 @@ src/
     heartbeat.rs       healthcheck pings (ureq)
     store.rs           watched services + global switch: notify.json, atomic writes
   tailscale.rs         tailscaled LocalAPI status → admin console link (cached, on demand)
+  hosts.rs             allowed Host names (DNS-rebinding protection), CUTHULU_ALLOWED_HOSTS
   api/
     mod.rs             /api router
     services.rs        list / detail / actions
@@ -490,6 +491,7 @@ context, so containers get their settings from Compose as before.
 | Variable                 | Default                        | Meaning |
 |--------------------------|--------------------------------|---------|
 | `CUTHULU_BIND`           | `127.0.0.1:8686` (image: `0.0.0.0:8686`) | Listen address |
+| `CUTHULU_ALLOWED_HOSTS`  | unset                          | Extra `Host` names to answer to, comma-separated: `name`, `.domain` (it and its subdomains) or `*` (any). Always allowed: `localhost`, IPs, single-label names, `*.ts.net`, `.local`, `.lan`, `.home.arpa`, `.internal`, `.localhost` |
 | `CUTHULU_DOCKER_HOST`    | `unix:///var/run/docker.sock`  | Docker endpoint (`unix://` or `tcp://`) |
 | `CUTHULU_READ_ONLY`      | `false`                        | Refuse start/stop/restart, hide the buttons |
 | `CUTHULU_LOG_TAIL`       | `500`                          | History lines per log view (max 10 000) |
@@ -533,6 +535,13 @@ to the host**. Therefore:
   `http://<machine>/` with nothing to run on the host. The trust boundary is
   therefore everyone on the LAN and tailnet; `127.0.0.1:80:8686` narrows it
   to the machine ([DEPLOYMENT.md](DEPLOYMENT.md#security)).
+- Every request's `Host` must be a name a website cannot take over (see
+  `CUTHULU_ALLOWED_HOSTS`), else `421`. Without it, a page could rebind its
+  own domain to this machine and pass the same-origin check below. Requests
+  without a `Host` (non-browser clients) pass.
+- HTTPS is not built in: the optional `tailscale` compose service (a
+  `tailscale/tailscale` sidecar, its own tailnet node) terminates TLS and
+  proxies to `cuthulu:8686`, keeping the browser's `Host`.
 - POSTs require the `X-Cuthulu: 1` header (a cross-site form cannot set it and
   a cross-site `fetch` with it needs a CORS preflight that is never granted),
   plus `Origin` must match `Host` and `Sec-Fetch-Site` must be same-origin

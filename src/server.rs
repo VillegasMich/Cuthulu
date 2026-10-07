@@ -3,9 +3,10 @@
 use std::sync::Arc;
 
 use axum::Router;
-use axum::http::{HeaderName, HeaderValue, header};
-use axum::middleware;
-use axum::response::Response;
+use axum::extract::{Request, State};
+use axum::http::{HeaderName, HeaderValue, StatusCode, header};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use tokio_util::sync::CancellationToken;
 
@@ -41,8 +42,32 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(|| async { "ok" }))
         .nest("/api", api::router())
         .fallback(web::not_found)
+        .layer(middleware::from_fn_with_state(state.clone(), check_host))
         .layer(middleware::map_response(security_headers))
         .with_state(state)
+}
+
+/// Refuses requests for host names this machine does not go by, so a page
+/// that rebinds its own DNS name to this machine cannot use the API.
+/// Requests without a host (non-browser clients) pass.
+async fn check_host(State(state): State<AppState>, req: Request, next: Next) -> Response {
+    let host = req
+        .headers()
+        .get(header::HOST)
+        .map(|v| v.to_str().unwrap_or_default())
+        .or_else(|| {
+            req.uri()
+                .authority()
+                .map(axum::http::uri::Authority::as_str)
+        });
+    match host {
+        Some(host) if !state.config.allowed_hosts.allows(host) => (
+            StatusCode::MISDIRECTED_REQUEST,
+            "unknown host name; add it to CUTHULU_ALLOWED_HOSTS\n",
+        )
+            .into_response(),
+        _ => next.run(req).await,
+    }
 }
 
 const CSP: &str = "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; \
@@ -231,6 +256,48 @@ mod tests {
 
         let (status, _, body) = send(&app, stop_from(&format!("http://{host}"))).await;
         assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    #[tokio::test]
+    async fn refuses_unknown_host_names() {
+        let (app, registry) = app_with(vec![web()], false).await;
+        let with_host = |method: &str, uri: &str, host: &str| {
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header(header::HOST, host)
+                .header(header::ORIGIN, format!("http://{host}"))
+                .header(api::CSRF_HEADER, "1")
+                .body(Body::empty())
+                .unwrap()
+        };
+        let stop = format!("/api/services/{}/stop", web().id);
+
+        // A rebound name passes the same-origin check, so the host check must stop it.
+        for (method, uri) in [
+            ("GET", "/"),
+            ("GET", "/api/services"),
+            ("POST", stop.as_str()),
+        ] {
+            let (status, headers, _) = send(&app, with_host(method, uri, "evil.example")).await;
+            assert_eq!(status, StatusCode::MISDIRECTED_REQUEST, "{method} {uri}");
+            assert!(headers.contains_key(header::CONTENT_SECURITY_POLICY));
+        }
+        assert_eq!(
+            registry.get(&web().id).unwrap().state,
+            ServiceState::Running
+        );
+
+        for host in [
+            "localhost",
+            "100.115.90.103",
+            "box",
+            "box.tail1234.ts.net",
+            "nas.lan:80",
+        ] {
+            let (status, _, _) = send(&app, with_host("GET", "/api/services", host)).await;
+            assert_eq!(status, StatusCode::OK, "{host}");
+        }
     }
 
     #[tokio::test]

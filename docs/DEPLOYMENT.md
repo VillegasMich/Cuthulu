@@ -46,8 +46,46 @@ services:
       # CUTHULU_SYSTEM_PROCESSES: "true"
       # CUTHULU_READ_ONLY: "true"
 
+  # Optional HTTPS on the tailnet: https://cuthulu.<tailnet>.ts.net with a real
+  # certificate (secure origin: desktop notifications, HTTP/2). Joins the
+  # tailnet as its own machine; nothing runs on the host. Turn it on with
+  # COMPOSE_PROFILES=tailscale in .env; see docs/DEPLOYMENT.md#https-on-the-tailnet.
+  tailscale:
+    image: tailscale/tailscale:stable
+    profiles: [tailscale]
+    container_name: cuthulu-tailscale
+    restart: unless-stopped
+    depends_on: [cuthulu]
+    environment:
+      TS_HOSTNAME: ${TS_HOSTNAME:-cuthulu}
+      # Only for the first start; without it the log prints a login link.
+      TS_AUTHKEY: ${TS_AUTHKEY:-}
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_USERSPACE: "true" # no NET_ADMIN, no /dev/net/tun
+      TS_SERVE_CONFIG: /config/serve.json
+    configs:
+      - source: tailscale-serve
+        target: /config/serve.json
+    volumes:
+      - tailscale-state:/var/lib/tailscale # the node's identity; keep it
+
+configs:
+  # tailnet-only HTTPS on 443 to cuthulu:8686 (no AllowFunnel: never public).
+  # $$ escapes compose interpolation; containerboot fills in the cert domain.
+  tailscale-serve:
+    content: |
+      {
+        "TCP": { "443": { "HTTPS": true } },
+        "Web": {
+          "$${TS_CERT_DOMAIN}:443": {
+            "Handlers": { "/": { "Proxy": "http://cuthulu:8686" } }
+          }
+        }
+      }
+
 volumes:
   cuthulu-data:
+  tailscale-state:
 ```
 
 Run the [published image](#published-images) (Compose pulls it; before the
@@ -92,6 +130,62 @@ docker run -d --name cuthulu --restart unless-stopped \
   --stop-timeout 15 \
   villegasmich/cuthulu:1.2.3   # or `cuthulu` after `docker build -t cuthulu .`
 ```
+
+## HTTPS on the tailnet
+
+The compose file has an optional `tailscale` service (a
+[`tailscale/tailscale`](https://hub.docker.com/r/tailscale/tailscale)
+sidecar) that joins your tailnet as its own machine, `cuthulu`, and serves
+`https://cuthulu.<tailnet>.ts.net/` with a real Let's Encrypt certificate,
+proxying to the `cuthulu` container. Nothing is installed or run on the host,
+and it is reachable from the tailnet only (no Funnel). A secure origin is
+what browsers require for [desktop notifications](#desktop-notifications),
+and HTTPS brings HTTP/2, so many open tabs no longer run into the
+six-connections-per-site limit of plain HTTP. `http://<machine>/` keeps
+working next to it.
+
+One-time setup:
+
+1. Admin console → **DNS**: MagicDNS on, **HTTPS Certificates** →
+   *Enable*.
+2. Turn the service on — add to `.env` next to `compose.yaml`:
+
+   ```dotenv
+   COMPOSE_PROFILES=tailscale
+   # TS_HOSTNAME=cuthulu   # tailnet machine name (default cuthulu)
+   ```
+
+3. Start it and log the new machine in, either with the link it prints:
+
+   ```sh
+   DOCKER_GID=$(stat -c %g /var/run/docker.sock) docker compose up -d
+   docker compose logs tailscale | grep -m1 login.tailscale.com
+   ```
+
+   or with an auth key (admin console → *Settings* → *Keys*, one-off) for
+   the first start only:
+
+   ```sh
+   TS_AUTHKEY=tskey-auth-... DOCKER_GID=$(stat -c %g /var/run/docker.sock) docker compose up -d
+   ```
+
+   Passing the key on the command line keeps it out of `.env`, which the
+   `cuthulu` container also reads. After the login the node's identity lives
+   in the `tailscale-state` volume; later `docker compose up -d` runs need no
+   key.
+4. Admin console → *Machines* → `cuthulu` → *Disable key expiry*, or it has
+   to log in again after 180 days.
+5. Open `https://cuthulu.<tailnet>.ts.net/` (the first request waits a few
+   seconds for the certificate).
+
+- The machine name appears in public certificate-transparency logs; that is
+  how Tailscale HTTPS certificates work.
+- Tailscale forwards the browser's `Host`, so the
+  [host check](#security) and the same-origin check pass; the event and log
+  streams are passed through as they arrive.
+- To remove it: `docker compose down`, remove `COMPOSE_PROFILES` from
+  `.env`, delete the machine in the admin console and, if you like, the
+  volume (`docker volume rm <project>_tailscale-state`).
 
 ## Host panel
 
@@ -201,8 +295,9 @@ notification (after 10 s, so restarts stay quiet). The browser asks for
 permission when you first click a bell, the alerts switch or `allow` in the
 dialog. Browsers allow notifications only on secure origins:
 `http://localhost` and `http://127.0.0.1` work, on any port (also through
-`ssh -L`); a plain-HTTP LAN or tailnet address does not, and alerts then
-show in the page instead.
+`ssh -L`), and so does the [HTTPS tailnet address](#https-on-the-tailnet);
+a plain-HTTP LAN or tailnet address does not, and alerts then show in the
+page instead.
 
 ### Healthcheck with healthchecks.io
 
@@ -446,3 +541,17 @@ tailnet can stop, start and restart its containers. If that is too wide:
 - set `CUTHULU_READ_ONLY=true` if you only want to watch.
 
 `cargo run` and the bare binary keep listening on `127.0.0.1:8686`.
+
+Cuthulu only answers to host names a website cannot take over: `localhost`,
+IP addresses, single-word names (MagicDNS short names), and names ending in
+`.ts.net`, `.local`, `.lan`, `.home.arpa`, `.internal` or `.localhost`. Any
+other `Host` gets `421 Misdirected Request`. This stops DNS rebinding, where
+a page you visit points its own domain at your machine and then uses the
+dashboard as if it were same-origin. If you reach Cuthulu under another
+name (say your own domain pointing at the machine), list it:
+
+```dotenv
+CUTHULU_ALLOWED_HOSTS=dash.example.com,.home.example.org
+```
+
+A leading dot allows the domain and its subdomains; `*` turns the check off.

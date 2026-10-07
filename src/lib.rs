@@ -4,6 +4,7 @@ pub mod api;
 pub mod build_info;
 pub mod config;
 pub mod envfile;
+pub mod hosts;
 pub mod model;
 pub mod notify;
 pub mod providers;
