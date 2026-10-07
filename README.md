@@ -10,6 +10,13 @@ container.
 **Status:** early but usable — the dashboard, live updates, logs and
 start/stop/restart work. See the [roadmap](docs/ROADMAP.md).
 
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="docs/screenshots/dashboard-light.png">
+  <img alt="Dashboard: host panel with per-core CPU, memory, IPs and top processes above the service list" src="docs/screenshots/dashboard-dark.png">
+</picture>
+
+![Service page with container details, TODO notes and live logs with stderr highlighted](docs/screenshots/service-detail.png)
+
 ## Features
 
 - Auto-discovers every container on the host, no configuration

@@ -75,6 +75,27 @@ docker build + smoke test.
 - Keep docs in sync: if a decision in `docs/` changes, update the doc in the
   same change.
 
+## Commit message suggestion
+
+At the end of every feature or request that changes files, end the reply with
+a suggested commit message in a code block. Do not commit unless asked.
+
+- Follow commitlint (`@commitlint/config-conventional`):
+  `type(scope): subject` — types `feat`, `fix`, `docs`, `style`, `refactor`,
+  `perf`, `test`, `build`, `ci`, `chore`, `revert`.
+- Scope = area touched, matching existing ones: `ui`, `notify`, `system`,
+  `logs`, `todos`, `config`, `version`, `release`, `tailscale`. Omit if the
+  change is cross-cutting.
+- Subject: imperative, lowercase, no trailing period, ≤ 72 chars; say what
+  changed for the user, not how. Add a body only when the "why" isn't obvious.
+- Describe only the changes from this request (check `git status`/`git diff`),
+  not unrelated uncommitted work. If they split cleanly, suggest one message
+  per commit.
+- Match the tone of `git log --oneline`, e.g.
+  `feat(notify): healthcheck heartbeat, shutdown email and service-down alerts`,
+  `fix(system): hide the container's hostname and spell out threads`,
+  `docs: document the host panel, its endpoints and CUTHULU_PROC_DIR`.
+
 ## Local environment notes
 
 - Host has Docker 29.x; socket `/var/run/docker.sock` owned by group `docker`.
