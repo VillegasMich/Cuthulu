@@ -7,6 +7,8 @@ use std::time::Duration;
 
 use lettre::message::Mailbox;
 
+use crate::hosts::AllowedHosts;
+
 /// Hard upper bound for log history requested per stream.
 pub const MAX_LOG_TAIL: usize = 10_000;
 /// Bounds for the host panel's sampling interval, in seconds.
@@ -16,6 +18,8 @@ pub const SYSTEM_SECS: std::ops::RangeInclusive<u64> = 1..=60;
 pub struct Config {
     /// Address the HTTP server listens on.
     pub bind: SocketAddr,
+    /// `Host` names answered on top of the built-in local/tailnet rules.
+    pub allowed_hosts: AllowedHosts,
     /// Docker endpoint, `unix://…` or `tcp://…`.
     pub docker_host: String,
     /// Disable start/stop/restart.
@@ -53,6 +57,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             bind: SocketAddr::from(([127, 0, 0, 1], 8686)),
+            allowed_hosts: AllowedHosts::default(),
             docker_host: "unix:///var/run/docker.sock".to_owned(),
             read_only: false,
             log_tail: 500,
@@ -90,6 +95,12 @@ impl Config {
                 v.parse()
                     .map_err(|e: std::net::AddrParseError| e.to_string())
             })?,
+            allowed_hosts: parse(
+                get("CUTHULU_ALLOWED_HOSTS"),
+                "CUTHULU_ALLOWED_HOSTS",
+                d.allowed_hosts,
+                AllowedHosts::parse,
+            )?,
             docker_host: get("CUTHULU_DOCKER_HOST").unwrap_or(d.docker_host),
             read_only: parse(
                 get("CUTHULU_READ_ONLY"),
@@ -572,6 +583,14 @@ mod tests {
         assert!(from(&[("CUTHULU_READ_ONLY", "maybe")]).is_err());
         assert!(from(&[("CUTHULU_LOG_TAIL", "999999")]).is_err());
         assert!(from(&[("CUTHULU_RECONCILE_SECS", "0")]).is_err());
+        assert!(from(&[("CUTHULU_ALLOWED_HOSTS", "box.example.com:80")]).is_err());
+    }
+
+    #[test]
+    fn allowed_hosts_extend_the_built_in_rules() {
+        let c = from(&[("CUTHULU_ALLOWED_HOSTS", "dash.example.com")]).unwrap();
+        assert!(c.allowed_hosts.allows("dash.example.com"));
+        assert!(!Config::default().allowed_hosts.allows("dash.example.com"));
     }
 
     #[test]

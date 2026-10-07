@@ -7,8 +7,12 @@ services:
     build: .
     container_name: cuthulu
     restart: unless-stopped
+    # Host port 80 on every interface, for http://<machine>/ from the tailnet.
+    # No login and the socket below is root-equivalent: anyone on your LAN or
+    # tailnet gets control. "127.0.0.1:80:8686" keeps it on this machine;
+    # CUTHULU_READ_ONLY=true allows watching only.
     ports:
-      - "127.0.0.1:8686:8686" # localhost only: the socket below is root-equivalent
+      - "80:8686"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       # Host panel (CPU, memory, processes): the host's procfs, read-only.
@@ -36,5 +40,43 @@ services:
       # CUTHULU_SYSTEM_PROCESSES: "true"
       # CUTHULU_READ_ONLY: "true"
 
+  # Optional HTTPS on the tailnet: https://cuthulu.<tailnet>.ts.net with a real
+  # certificate (secure origin: desktop notifications, HTTP/2). Joins the
+  # tailnet as its own machine; nothing runs on the host. Turn it on with
+  # COMPOSE_PROFILES=tailscale in .env; see docs/DEPLOYMENT.md#https-on-the-tailnet.
+  tailscale:
+    image: tailscale/tailscale:stable
+    profiles: [tailscale]
+    container_name: cuthulu-tailscale
+    restart: unless-stopped
+    depends_on: [cuthulu]
+    environment:
+      TS_HOSTNAME: ${TS_HOSTNAME:-cuthulu}
+      # Only for the first start; without it the log prints a login link.
+      TS_AUTHKEY: ${TS_AUTHKEY:-}
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_USERSPACE: "true" # no NET_ADMIN, no /dev/net/tun
+      TS_SERVE_CONFIG: /config/serve.json
+    configs:
+      - source: tailscale-serve
+        target: /config/serve.json
+    volumes:
+      - tailscale-state:/var/lib/tailscale # the node's identity; keep it
+
+configs:
+  # tailnet-only HTTPS on 443 to cuthulu:8686 (no AllowFunnel: never public).
+  # $$ escapes compose interpolation; containerboot fills in the cert domain.
+  tailscale-serve:
+    content: |
+      {
+        "TCP": { "443": { "HTTPS": true } },
+        "Web": {
+          "$${TS_CERT_DOMAIN}:443": {
+            "Handlers": { "/": { "Proxy": "http://cuthulu:8686" } }
+          }
+        }
+      }
+
 volumes:
   cuthulu-data:
+  tailscale-state:

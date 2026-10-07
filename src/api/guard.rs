@@ -63,6 +63,32 @@ mod tests {
     }
 
     #[test]
+    fn accepts_port_less_host() {
+        // Port 80 (or 443 behind a proxy): the browser sends neither side a port.
+        for origin in ["http://box.tail1234.ts.net", "https://box.tail1234.ts.net"] {
+            let h = headers(&[
+                (HEADER, "1"),
+                ("host", "box.tail1234.ts.net"),
+                ("origin", origin),
+                ("sec-fetch-site", "same-origin"),
+            ]);
+            assert!(same_origin(&h).is_ok(), "{origin}");
+        }
+        let short = headers(&[(HEADER, "1"), ("host", "box"), ("origin", "http://box")]);
+        assert!(same_origin(&short).is_ok());
+    }
+
+    #[test]
+    fn rejects_origin_whose_port_differs_from_host() {
+        let h = headers(&[
+            (HEADER, "1"),
+            ("host", "box.tail1234.ts.net"),
+            ("origin", "http://box.tail1234.ts.net:8686"),
+        ]);
+        assert!(same_origin(&h).is_err());
+    }
+
+    #[test]
     fn accepts_non_browser_clients_with_header() {
         assert!(same_origin(&headers(&[(HEADER, "1")])).is_ok());
     }
