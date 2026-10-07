@@ -155,13 +155,9 @@ impl Config {
                 "CUTHULU_TAILSCALE_URL",
                 d.tailscale_url,
                 |v| {
-                    if (v.starts_with("https://") || v.starts_with("http://"))
-                        && !v.chars().any(char::is_whitespace)
-                    {
-                        Ok(Some(v.to_owned()))
-                    } else {
-                        Err("must be an http(s) URL".to_owned())
-                    }
+                    http_url(v)
+                        .map(Some)
+                        .ok_or_else(|| "must be an http(s) URL".to_owned())
                 },
             )?,
         })
@@ -203,6 +199,9 @@ const DEFAULT_COOLDOWN_MINUTES: u64 = 15;
 /// Display name on notification emails whose sender address has none.
 const EMAIL_SENDER_NAME: &str = "cuthulu";
 const REDACTED: &str = "[redacted]";
+/// Where the healthchecks.io button goes unless `CUTHULU_HEALTHCHECK_LINK`
+/// says otherwise; signed-in users land on their projects.
+pub const HEALTHCHECK_DASHBOARD: &str = "https://healthchecks.io/";
 
 /// Outgoing notifications. Both channels are `None` when unconfigured or
 /// when `CUTHULU_NOTIFY_ENABLED=false`.
@@ -210,10 +209,36 @@ const REDACTED: &str = "[redacted]";
 pub struct NotifyConfig {
     pub email: Option<EmailConfig>,
     pub healthcheck: Option<HealthcheckConfig>,
+    /// `CUTHULU_HEALTHCHECK_URL` is set, even if `healthcheck` is `None`
+    /// because notifications are off.
+    pub healthcheck_configured: bool,
+    /// `CUTHULU_HEALTHCHECK_LINK`: where the topbar's healthchecks.io button
+    /// goes instead of [`HEALTHCHECK_DASHBOARD`]. Not secret.
+    pub healthcheck_link: Option<String>,
     /// Least time between two "down" emails for the same service.
     pub cooldown: Duration,
     /// Name for this machine in email subjects; `None` = detect.
     pub host: Option<String>,
+}
+
+impl NotifyConfig {
+    /// Target of the healthchecks.io button, which is only shown when a
+    /// ping URL is configured.
+    #[must_use]
+    pub fn healthcheck_button(&self) -> Option<&str> {
+        self.healthcheck_configured.then(|| {
+            self.healthcheck_link
+                .as_deref()
+                .unwrap_or(HEALTHCHECK_DASHBOARD)
+        })
+    }
+
+    /// `CUTHULU_HEALTHCHECK_LINK` is set but there is no ping URL, so no
+    /// button to use it.
+    #[must_use]
+    pub fn healthcheck_link_unused(&self) -> bool {
+        self.healthcheck_link.is_some() && !self.healthcheck_configured
+    }
 }
 
 impl Default for NotifyConfig {
@@ -221,6 +246,8 @@ impl Default for NotifyConfig {
         Self {
             email: None,
             healthcheck: None,
+            healthcheck_configured: false,
+            healthcheck_link: None,
             cooldown: Duration::from_secs(DEFAULT_COOLDOWN_MINUTES * 60),
             host: None,
         }
@@ -325,9 +352,17 @@ fn parse_notify(
     // surface a typo made long ago.
     let email = parse_email(get)?;
     let healthcheck = parse_healthcheck(get, interval)?;
+    let key = "CUTHULU_HEALTHCHECK_LINK";
+    let healthcheck_link = parse(get(key), key, None, |v| {
+        http_url(v)
+            .map(Some)
+            .ok_or_else(|| "must be an http(s) URL".to_owned())
+    })?;
     Ok(NotifyConfig {
         email: email.filter(|_| enabled),
+        healthcheck_configured: healthcheck.is_some(),
         healthcheck: healthcheck.filter(|_| enabled),
+        healthcheck_link,
         cooldown,
         host,
     })
@@ -485,6 +520,12 @@ fn parse_healthcheck(
         url: Secret::new(url),
         interval,
     }))
+}
+
+/// `v` when it is an http(s) URL without whitespace (safe as a link target).
+fn http_url(v: &str) -> Option<String> {
+    ((v.starts_with("https://") || v.starts_with("http://")) && !v.chars().any(char::is_whitespace))
+        .then(|| v.to_owned())
 }
 
 #[cfg(test)]
@@ -691,6 +732,49 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    #[test]
+    fn healthcheck_button_defaults_to_the_dashboard() {
+        let n = from(&[]).unwrap().notify;
+        assert_eq!(n.healthcheck_button(), None);
+        assert!(!n.healthcheck_link_unused());
+
+        let url = ("CUTHULU_HEALTHCHECK_URL", "https://hc-ping.com/secret-uuid");
+        let notify = |extra: &[(&'static str, &'static str)]| with(&[url], extra).map(|c| c.notify);
+        assert_eq!(
+            notify(&[]).unwrap().healthcheck_button(),
+            Some(HEALTHCHECK_DASHBOARD)
+        );
+        let n = notify(&[(
+            "CUTHULU_HEALTHCHECK_LINK",
+            " https://hc.example.com/projects/1/ ",
+        )])
+        .unwrap();
+        assert_eq!(
+            n.healthcheck_button(),
+            Some("https://hc.example.com/projects/1/")
+        );
+        assert!(!n.healthcheck_link_unused());
+        // Kept with notifications off: the button then says "pings off".
+        let n = notify(&[("CUTHULU_NOTIFY_ENABLED", "false")]).unwrap();
+        assert!(n.healthcheck.is_none());
+        assert_eq!(n.healthcheck_button(), Some(HEALTHCHECK_DASHBOARD));
+
+        for bad in ["javascript:alert(1)", "healthchecks.io", "https://a b"] {
+            let err = notify(&[("CUTHULU_HEALTHCHECK_LINK", bad)]).unwrap_err();
+            assert!(!err.to_string().contains("secret-uuid"), "{err}");
+        }
+    }
+
+    #[test]
+    fn healthcheck_link_without_ping_url_is_accepted_but_unused() {
+        let n = from(&[("CUTHULU_HEALTHCHECK_LINK", "https://healthchecks.io/")])
+            .unwrap()
+            .notify;
+        assert_eq!(n.healthcheck_button(), None);
+        assert!(n.healthcheck_link_unused());
+        assert!(from(&[("CUTHULU_HEALTHCHECK_LINK", "ftp://x")]).is_err());
     }
 
     #[test]

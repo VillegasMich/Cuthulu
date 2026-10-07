@@ -24,7 +24,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use self::alerts::Tracker;
-use self::heartbeat::Pinger;
+pub use self::heartbeat::Outcome;
+use self::heartbeat::{LastPing, PingLog, Pinger};
 use self::mail::{Mailer, Message, SmtpMailer};
 pub use self::store::{NotifyStore, Settings, StoreError};
 use crate::config::Config;
@@ -39,6 +40,8 @@ const SEND_ATTEMPTS: u32 = 3;
 const RETRY_DELAY: Duration = Duration::from_secs(10);
 /// The shutdown email must fit in `docker stop`'s default 10 s grace.
 const SHUTDOWN_BUDGET: Duration = Duration::from_secs(8);
+/// How often an ignored `CUTHULU_HEALTHCHECK_LINK` is pointed out again.
+const UNUSED_LINK_WARNING: Duration = Duration::from_secs(3600);
 
 /// What the UI needs to know. Never carries addresses, URLs or secrets.
 #[derive(Debug, Clone, Serialize)]
@@ -55,6 +58,71 @@ pub struct NotifyState {
     /// Running services that were stopped through Cuthulu and then started
     /// by something else (a systemd unit, a restart policy), sorted.
     pub restarted_elsewhere: Vec<String>,
+}
+
+/// What `GET /api/healthcheck` returns for the topbar button. `url` is the
+/// dashboard link, which is not secret; the ping URL never leaves the server.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HealthcheckStatus {
+    /// False without `CUTHULU_HEALTHCHECK_URL`: the button stays hidden.
+    pub available: bool,
+    pub url: Option<String>,
+    pub state: PingState,
+    /// When the latest ping was attempted (or skipped), RFC 3339.
+    pub last_ping_at: Option<String>,
+    /// Why it failed or was skipped. Never contains the ping URL.
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PingState {
+    Ok,
+    Failed,
+    /// Not sent because a provider is disconnected; the healthcheck server
+    /// will report Cuthulu down once its grace period runs out.
+    Skipped,
+    /// Pinging, but nothing attempted yet.
+    Pending,
+    /// Not pinging: unconfigured, or `CUTHULU_NOTIFY_ENABLED=false`.
+    Off,
+}
+
+/// Why a skipped ping was not sent, as shown in the UI.
+const SKIPPED: &str = "a provider is disconnected";
+
+/// The button's status from the configured link, whether pings are sent,
+/// and the latest attempt.
+fn healthcheck_status(
+    link: Option<&str>,
+    pinging: bool,
+    last: Option<LastPing>,
+) -> HealthcheckStatus {
+    let Some(link) = link else {
+        return HealthcheckStatus {
+            available: false,
+            url: None,
+            state: PingState::Off,
+            last_ping_at: None,
+            error: None,
+        };
+    };
+    let (state, last_ping_at, error) = match last {
+        _ if !pinging => (PingState::Off, None, None),
+        None => (PingState::Pending, None, None),
+        Some(LastPing { at, outcome }) => match outcome {
+            Outcome::Sent => (PingState::Ok, Some(at), None),
+            Outcome::Failed(e) => (PingState::Failed, Some(at), Some(e)),
+            Outcome::Skipped => (PingState::Skipped, Some(at), Some(SKIPPED.to_owned())),
+        },
+    };
+    HealthcheckStatus {
+        available: true,
+        url: Some(link.to_owned()),
+        state,
+        last_ping_at,
+        error,
+    }
 }
 
 /// Outcome of `POST /api/notify/test`, per channel.
@@ -80,6 +148,11 @@ pub struct Notifier {
     mailer: Option<Arc<dyn Mailer>>,
     pinger: Option<Pinger>,
     heartbeat_interval: Duration,
+    /// Latest heartbeat, for the topbar button.
+    pings: Arc<PingLog>,
+    healthcheck_link: Option<String>,
+    /// `CUTHULU_HEALTHCHECK_LINK` without a ping URL: warned about hourly.
+    healthcheck_link_unused: bool,
     cooldown: Duration,
     host: String,
     started: Instant,
@@ -112,6 +185,9 @@ impl Notifier {
                 .healthcheck
                 .as_ref()
                 .map_or(Duration::from_secs(300), |h| h.interval),
+            pings: Arc::default(),
+            healthcheck_link: n.healthcheck_button().map(str::to_owned),
+            healthcheck_link_unused: n.healthcheck_link_unused(),
             cooldown: n.cooldown,
             host: host_name(n.host.as_deref()),
             started: Instant::now(),
@@ -151,11 +227,19 @@ impl Notifier {
             tasks.push(tokio::spawn(heartbeat::run(
                 self.heartbeat_interval,
                 cancel.clone(),
+                Arc::clone(&self.pings),
                 move || reg.statuses().iter().all(|s| s.connected),
                 move || {
                     let p = pinger.clone();
                     async move { p.ping().await }
                 },
+            )));
+        }
+
+        if self.healthcheck_link_unused {
+            tasks.push(tokio::spawn(warn_unused_link(
+                UNUSED_LINK_WARNING,
+                cancel.clone(),
             )));
         }
         tasks
@@ -195,12 +279,34 @@ impl Notifier {
         let healthcheck = match &self.pinger {
             None => ChannelResult::Off,
             Some(p) => match p.ping().await {
-                Ok(()) => ChannelResult::Sent,
-                Err(error) => ChannelResult::Failed { error },
+                Ok(()) => {
+                    self.pings.record(Outcome::Sent);
+                    ChannelResult::Sent
+                }
+                Err(error) => {
+                    self.pings.record(Outcome::Failed(error.clone()));
+                    ChannelResult::Failed { error }
+                }
             },
         };
         info!(?email, ?healthcheck, "test notification");
         TestReport { email, healthcheck }
+    }
+
+    /// How the heartbeat is doing, for the topbar button.
+    #[must_use]
+    pub fn healthcheck(&self) -> HealthcheckStatus {
+        healthcheck_status(
+            self.healthcheck_link.as_deref(),
+            self.pinger.is_some(),
+            self.pings.last(),
+        )
+    }
+
+    /// Records a heartbeat as if the background loop had sent it.
+    #[cfg(test)]
+    pub(crate) fn record_ping(&self, outcome: Outcome) {
+        self.pings.record(outcome);
     }
 
     /// Reports a clean shutdown by email, giving up after 8 s.
@@ -307,6 +413,20 @@ impl Notifier {
             if self.outbox.try_send(message).is_err() {
                 warn!(service = %alert.name, "email outbox full; alert dropped");
             }
+        }
+    }
+}
+
+/// Repeats, now and every `period`, that the dashboard link does nothing:
+/// a startup line alone scrolls out of `docker logs` too easily.
+async fn warn_unused_link(period: Duration, cancel: CancellationToken) {
+    let mut tick = tokio::time::interval(period);
+    loop {
+        tokio::select! {
+            () = cancel.cancelled() => break,
+            _ = tick.tick() => warn!(
+                "CUTHULU_HEALTHCHECK_LINK has no effect without CUTHULU_HEALTHCHECK_URL"
+            ),
         }
     }
 }
@@ -620,6 +740,58 @@ pub(crate) mod tests {
             "{report:?}"
         );
         assert!(matches!(report.healthcheck, ChannelResult::Off));
+    }
+
+    #[test]
+    fn healthcheck_status_follows_the_latest_ping() {
+        let link = Some("https://healthchecks.io/");
+        let at = |outcome| {
+            Some(LastPing {
+                at: "2026-10-06T12:00:00Z".into(),
+                outcome,
+            })
+        };
+        let st = healthcheck_status(None, false, None);
+        assert!(!st.available);
+        assert_eq!((st.url, st.state), (None, PingState::Off));
+
+        let st = healthcheck_status(link, false, None);
+        assert!(st.available);
+        assert_eq!(st.url.as_deref(), link);
+        assert_eq!(st.state, PingState::Off, "notifications off");
+
+        assert_eq!(
+            healthcheck_status(link, true, None).state,
+            PingState::Pending
+        );
+
+        let st = healthcheck_status(link, true, at(Outcome::Sent));
+        assert_eq!(st.state, PingState::Ok);
+        assert_eq!(st.last_ping_at.as_deref(), Some("2026-10-06T12:00:00Z"));
+        assert_eq!(st.error, None);
+
+        let st = healthcheck_status(link, true, at(Outcome::Failed("io: refused".into())));
+        assert_eq!(
+            (st.state, st.error.as_deref()),
+            (PingState::Failed, Some("io: refused"))
+        );
+
+        let st = healthcheck_status(link, true, at(Outcome::Skipped));
+        assert_eq!(
+            (st.state, st.error.as_deref()),
+            (PingState::Skipped, Some(SKIPPED))
+        );
+    }
+
+    #[tokio::test]
+    async fn unused_link_warning_repeats_until_shutdown() {
+        let cancel = CancellationToken::new();
+        let period = Duration::from_millis(5);
+        let task = tokio::spawn(warn_unused_link(period, cancel.clone()));
+        tokio::time::sleep(period * 4).await;
+        assert!(!task.is_finished());
+        cancel.cancel();
+        task.await.unwrap();
     }
 
     #[test]

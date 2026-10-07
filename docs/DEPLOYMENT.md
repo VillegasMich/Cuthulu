@@ -217,6 +217,12 @@ Cuthulu after period + grace (~20 min), and the shutdown email has already
 told you it was deliberate. A quick restart (compose update) sends only the
 shutdown email. When you stop Cuthulu for good, **pause** the check.
 
+With a ping URL set, the topbar shows a pulse icon that opens healthchecks.io
+in a new tab; its tooltip says how Cuthulu's last ping went (`last ping ok 2m
+ago`), and it turns red when the last ping failed or was skipped. It opens
+`https://healthchecks.io/` unless `CUTHULU_HEALTHCHECK_LINK` names another
+page (your project, or a self-hosted instance).
+
 ### Test and turn off
 
 Open the bell dialog and press `send test`, or:
