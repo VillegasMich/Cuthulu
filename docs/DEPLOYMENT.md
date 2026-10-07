@@ -438,10 +438,12 @@ rename).
   (`x86_64-` / `aarch64-unknown-linux-musl`, arm64 linked with the
   toolchain's `rust-lld`); the runtime stage only copies files. A cold arm64
   build takes about as long as an amd64 one, where QEMU would make it many
-  times slower. The trade-off: this works because every dependency is pure
-  Rust. A crate that compiles C code would need a cross C toolchain (e.g.
-  `cargo-zigbuild`), or a switch back to QEMU (drop `--platform=$BUILDPLATFORM`
-  and add `docker/setup-qemu-action` in CI).
+  times slower. The trade-off: crates that compile C need a cross C
+  compiler. The only one today is `ring` (rustls' crypto, via `lettre` and
+  `ureq`), built for arm64 with Alpine's `clang`
+  (`CC_aarch64_unknown_linux_musl=clang`). If a future crate needs a full
+  aarch64 sysroot, use `cargo-zigbuild` or switch back to QEMU (drop
+  `--platform=$BUILDPLATFORM` and add `docker/setup-qemu-action` in CI).
 
   ```sh
   docker buildx build --platform linux/amd64,linux/arm64 -t <you>/cuthulu --push .
