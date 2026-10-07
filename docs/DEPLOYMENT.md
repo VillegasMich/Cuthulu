@@ -13,8 +13,12 @@ services:
     build: .
     container_name: cuthulu
     restart: unless-stopped
+    # Host port 80 on every interface, for http://<machine>/ from the tailnet.
+    # No login and the socket below is root-equivalent: anyone on your LAN or
+    # tailnet gets control. "127.0.0.1:80:8686" keeps it on this machine;
+    # CUTHULU_READ_ONLY=true allows watching only.
     ports:
-      - "127.0.0.1:8686:8686" # localhost only: the socket below is root-equivalent
+      - "80:8686"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       # Host panel (CPU, memory, processes): the host's procfs, read-only.
@@ -62,9 +66,15 @@ Or build this checkout (the result is tagged with the `image:` name):
 DOCKER_GID=$(stat -c %g /var/run/docker.sock) docker compose up -d --build
 ```
 
-Then open <http://localhost:8686>. The footer shows the running version
-(linked to its GitHub release) and, for CI-built images, the short commit;
-`GET /api/version` returns the same as JSON.
+Then open <http://localhost/>, or `http://<machine>/` (MagicDNS name) /
+`http://<100.x address>/` from other devices on your tailnet. The footer
+shows the running version (linked to its GitHub release) and, for CI-built
+images, the short commit; `GET /api/version` returns the same as JSON.
+
+Host port 80 must be free: if another web server already uses it, change the
+host side of the mapping (e.g. `"8080:8686"`). Before this default, compose
+published `127.0.0.1:8686`; existing deployments move from
+`http://localhost:8686` to `http://localhost/` on the next `up`.
 
 `DOCKER_GID` is needed because the image runs as an unprivileged user (uid
 65532); adding it to the socket's group is what lets it talk to Docker.
@@ -73,7 +83,7 @@ Then open <http://localhost:8686>. The footer shows the running version
 
 ```sh
 docker run -d --name cuthulu --restart unless-stopped \
-  -p 127.0.0.1:8686:8686 \
+  -p 80:8686 \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v /proc:/host/proc:ro -e CUTHULU_PROC_DIR=/host/proc \
   -v /var/run/tailscale:/var/run/tailscale:ro \
@@ -190,9 +200,9 @@ While a Cuthulu page is open, a watched service going down raises a desktop
 notification (after 10 s, so restarts stay quiet). The browser asks for
 permission when you first click a bell, the alerts switch or `allow` in the
 dialog. Browsers allow notifications only on secure origins:
-`http://localhost:8686` and `http://127.0.0.1:8686` work (also through
-`ssh -L`); a plain-HTTP LAN address does not, and alerts then show in the
-page instead.
+`http://localhost` and `http://127.0.0.1` work, on any port (also through
+`ssh -L`); a plain-HTTP LAN or tailnet address does not, and alerts then
+show in the page instead.
 
 ### Healthcheck with healthchecks.io
 
@@ -222,7 +232,7 @@ shutdown email. When you stop Cuthulu for good, **pause** the check.
 Open the bell dialog and press `send test`, or:
 
 ```sh
-curl -X POST -H 'X-Cuthulu: 1' http://127.0.0.1:8686/api/notify/test
+curl -X POST -H 'X-Cuthulu: 1' http://127.0.0.1/api/notify/test
 ```
 
 - Service alerts only: the switch in the dialog (kept in `notify.json`).
@@ -421,12 +431,18 @@ up automatically; variables set in the shell override them.
 
 ## Security
 
-Access to the Docker socket is equivalent to root on the host. Keep the port
-bound to `127.0.0.1`. Until `CUTHULU_AUTH_TOKEN` lands (roadmap phase 5) there
-is no authentication, so for remote access use an SSH tunnel:
+Access to the Docker socket is equivalent to root on the host, and until
+`CUTHULU_AUTH_TOKEN` lands (roadmap phase 5) there is no authentication. The
+compose file publishes port 80 on every interface so tailnet devices can
+reach `http://<machine>/`: everyone who can reach this machine on your LAN or
+tailnet can stop, start and restart its containers. If that is too wide:
 
-```sh
-ssh -L 8686:127.0.0.1:8686 your-machine
-```
+- publish `127.0.0.1:80:8686` (or `-p 127.0.0.1:80:8686`) and reach it from
+  elsewhere through an SSH tunnel: `ssh -L 8686:127.0.0.1:80 your-machine`,
+  then <http://localhost:8686>;
+- block port 80 from the LAN with the host firewall — note that Docker's
+  published ports bypass `ufw`'s default rules, so use the `DOCKER-USER`
+  chain;
+- set `CUTHULU_READ_ONLY=true` if you only want to watch.
 
-Set `CUTHULU_READ_ONLY=true` if you only want to watch.
+`cargo run` and the bare binary keep listening on `127.0.0.1:8686`.

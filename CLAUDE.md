@@ -61,8 +61,10 @@ docker build + smoke test.
 - **Bounded buffers** for every channel and stream (broadcast, logs, client ring buffer).
 - **Self-protection:** never allow stopping the service flagged `is_self`.
 - **Security:** state-changing routes are POST + same-origin check; respect
-  `CUTHULU_READ_ONLY`; never render env var values by default; keep default
-  port binding `127.0.0.1` in examples.
+  `CUTHULU_READ_ONLY`; never render env var values by default. The binary's
+  default bind stays `127.0.0.1`; `compose.yaml` publishes host port 80 on
+  all interfaces by the user's decision (tailnet access, see
+  `docs/DEPLOYMENT.md`). Don't widen anything else.
 - **UI style:** dense, monospace, terminal-like, light+dark via CSS custom
   properties. No gradients, glassmorphism, emoji icons, big rounded shadowed
   cards, or marketing copy. Follow `docs/DESIGN.md` tokens exactly.

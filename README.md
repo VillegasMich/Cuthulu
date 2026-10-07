@@ -42,10 +42,13 @@ git clone https://github.com/VillegasMich/cuthulu && cd cuthulu
 DOCKER_GID=$(stat -c %g /var/run/docker.sock) docker compose up -d --build
 ```
 
-Open <http://localhost:8686>.
+Open <http://localhost/>, or `http://<machine>/` from your tailnet.
 
 > **Warning:** mounting the Docker socket gives Cuthulu root-level control of
-> the host. Keep it bound to localhost. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+> the host, and there is no login. The compose file publishes port 80 on every
+> interface, so anyone on your LAN or tailnet can control your containers;
+> publish `127.0.0.1:80:8686` to keep it on this machine. See
+> [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#security).
 
 ## Development
 

@@ -68,7 +68,7 @@ their own Linux workstation or home server.
 ## Success criteria for the MVP
 
 - `docker compose up -d` (or a single `docker run`) brings Cuthulu up.
-- Opening `http://localhost:8686` shows all current containers within a second.
+- Opening `http://localhost/` shows all current containers within a second.
 - Stopping a container from the terminal is reflected in the UI within ~1s,
   without a page reload.
 - Logs of a chatty container stream smoothly without freezing the browser.

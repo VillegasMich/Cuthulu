@@ -7,8 +7,12 @@ services:
     build: .
     container_name: cuthulu
     restart: unless-stopped
+    # Host port 80 on every interface, for http://<machine>/ from the tailnet.
+    # No login and the socket below is root-equivalent: anyone on your LAN or
+    # tailnet gets control. "127.0.0.1:80:8686" keeps it on this machine;
+    # CUTHULU_READ_ONLY=true allows watching only.
     ports:
-      - "127.0.0.1:8686:8686" # localhost only: the socket below is root-equivalent
+      - "80:8686"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       # Host panel (CPU, memory, processes): the host's procfs, read-only.

@@ -527,7 +527,12 @@ build arg) is compiled in as the commit shown in the footer and
 Mounting `/var/run/docker.sock` gives the container **root-equivalent access
 to the host**. Therefore:
 
-- Default bind is `127.0.0.1`; the compose file publishes on `127.0.0.1` only.
+- The binary binds `127.0.0.1:8686` by default. The image binds
+  `0.0.0.0:8686` and the compose file publishes it as host port **80 on all
+  interfaces** — the user's decision, so tailnet devices reach
+  `http://<machine>/` with nothing to run on the host. The trust boundary is
+  therefore everyone on the LAN and tailnet; `127.0.0.1:80:8686` narrows it
+  to the machine ([DEPLOYMENT.md](DEPLOYMENT.md#security)).
 - POSTs require the `X-Cuthulu: 1` header (a cross-site form cannot set it and
   a cross-site `fetch` with it needs a CORS preflight that is never granted),
   plus `Origin` must match `Host` and `Sec-Fetch-Site` must be same-origin
