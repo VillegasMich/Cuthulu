@@ -137,7 +137,7 @@ body.alert .eye .pupil { fill: var(--err); }
 
 .tag { padding: 0 6px; border: 1px solid var(--warn); color: var(--warn); border-radius: 2px; }
 
-/* icon buttons (back, theme): same box as a text .btn, hand-drawn stroke icons */
+/* icon buttons (back, theme, links): same box as a text .btn, hand-drawn stroke icons */
 .btn.icon {
   display: inline-flex;
   align-items: center;
@@ -149,9 +149,13 @@ body.alert .eye .pupil { fill: var(--err); }
 }
 .btn.icon:hover:not(:disabled) { color: var(--text); }
 .ico { display: block; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+/* brand marks (github) are solid shapes, not strokes */
+.ico.fill { fill: currentColor; stroke: none; }
 
 .btn.icon[hidden] { display: none; }
 a.btn.icon:hover { text-decoration: none; }
+/* healthchecks.io: loud only when Cuthulu's own heartbeat is not getting through */
+#healthcheck.bad, #healthcheck.bad:hover { color: var(--err); }
 
 /* back: invisible (but keeps its slot) on the dashboard unless there is history */
 body[data-page="index"]:not(.can-back) #back { visibility: hidden; }

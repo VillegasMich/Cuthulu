@@ -1475,12 +1475,76 @@ async function initTailscale() {
   }
 }
 
+// ── healthcheck ────────────────────────────────────────────
+
+// Cheap single endpoint; the last ping only changes every few minutes.
+const HEALTHCHECK_REFRESH = 60_000;
+const healthcheck = { at: 0, timer: null, data: null };
+
+/** Tooltip text for the heartbeat state from `/api/healthcheck`. */
+function healthcheckLabel(hc) {
+  const when = hc.last_ping_at ? ` ${fmtAgo(hc.last_ping_at)}` : "";
+  const why = hc.error ? `: ${hc.error}` : "";
+  switch (hc.state) {
+    case "ok": return `healthchecks.io: last ping ok${when}`;
+    case "failed": return `healthchecks.io: last ping failed${when}${why}`;
+    case "skipped": return `healthchecks.io: ping skipped${when}${why}`;
+    case "pending": return "healthchecks.io: no ping yet";
+    default: return "healthchecks.io: pings off";
+  }
+}
+
+function drawHealthcheck() {
+  const hc = healthcheck.data;
+  const a = $("#healthcheck");
+  if (!hc?.available || !/^https?:\/\//.test(hc.url ?? "")) {
+    a.hidden = true;
+    return;
+  }
+  const label = healthcheckLabel(hc);
+  a.href = hc.url;
+  a.title = label;
+  a.setAttribute("aria-label", label);
+  a.classList.toggle("bad", hc.state === "failed" || hc.state === "skipped");
+  a.hidden = false;
+}
+
+async function loadHealthcheck() {
+  if (Date.now() - healthcheck.at < HEALTHCHECK_REFRESH) return;
+  healthcheck.at = Date.now();
+  try {
+    const res = await fetch("/api/healthcheck");
+    if (!res.ok) return;
+    healthcheck.data = await res.json();
+    drawHealthcheck();
+  } catch (_) {
+    /* keep the last state; retried on the next refresh */
+  }
+}
+
+/** Shows the topbar link to healthchecks.io with Cuthulu's last heartbeat. */
+function initHealthcheck() {
+  const tick = () => {
+    clearInterval(healthcheck.timer);
+    healthcheck.timer = null;
+    if (document.visibilityState !== "visible") return;
+    loadHealthcheck();
+    healthcheck.timer = setInterval(loadHealthcheck, HEALTHCHECK_REFRESH);
+  };
+  // Keep "2m ago" current between fetches.
+  $("#healthcheck").addEventListener("mouseenter", drawHealthcheck);
+  $("#healthcheck").addEventListener("focus", drawHealthcheck);
+  document.addEventListener("visibilitychange", tick);
+  tick();
+}
+
 // ── boot ───────────────────────────────────────────────────
 
 $("#theme").addEventListener("click", toggleTheme);
 initBack();
 initNotify();
 initTailscale();
+initHealthcheck();
 document.addEventListener("keydown", (e) => {
   if (e.ctrlKey || e.metaKey || e.altKey || typing(e)) return;
   if (e.key === "t") toggleTheme();

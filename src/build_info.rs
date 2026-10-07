@@ -10,7 +10,11 @@ use serde::Serialize;
 /// `Cargo.toml`'s version, e.g. `0.1.0`. Releases are tagged `v<VERSION>`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// GitHub release page of [`VERSION`].
+/// The project's GitHub repository, `Cargo.toml`'s `repository`.
+pub const REPO_URL: &str = env!("CARGO_PKG_REPOSITORY");
+
+/// GitHub release page of [`VERSION`], under [`REPO_URL`] (`concat!` needs
+/// the literal, hence the repeated `env!`).
 pub const RELEASE_URL: &str = concat!(
     env!("CARGO_PKG_REPOSITORY"),
     "/releases/tag/v",
@@ -74,6 +78,12 @@ mod tests {
         ] {
             assert_eq!(parse_sha(raw), None, "{raw:?}");
         }
+    }
+
+    #[test]
+    fn repo_url_is_the_github_repository() {
+        assert_eq!(REPO_URL, "https://github.com/VillegasMich/cuthulu");
+        assert!(RELEASE_URL.starts_with(REPO_URL));
     }
 
     #[test]
