@@ -104,7 +104,8 @@ stores an explicit choice in `localStorage` and sets `data-theme` on `<html>`.
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-- Top bar: back arrow, logo/eye, counts, connection state, theme toggle.
+- Top bar: back arrow, logo/eye, counts, notifications, connection state,
+  healthchecks.io, Tailscale, GitHub, theme toggle.
   - Back (`←`) goes to the previous cuthulu page in this tab's history, or to
     `/` when there is none. On the dashboard without history it is hidden but
     keeps its slot, so the eye never shifts between pages.
@@ -112,7 +113,7 @@ stores an explicit choice in `localStorage` and sets `data-theme` on `<html>`.
     (pure CSS, so it also follows `prefers-color-scheme` live).
   - Notifications (`.btn.icon`, before the connection state): a bell, struck
     through when service alerts are off. Opens the notifications dialog.
-  - Tailscale (left of the theme toggle, only when Tailscale is available): a
+  - Tailscale (left of GitHub, only when Tailscale is available): a
     link styled as `.btn.icon` with a three-node network glyph; opens this
     machine in the Tailscale admin console in a new tab. The tooltip names
     host, IP and tailnet. Hidden (not reserved) when unavailable. No brand
@@ -123,6 +124,9 @@ stores an explicit choice in `localStorage` and sets `data-theme` on `<html>`.
     ping (`healthchecks.io: last ping ok 2m ago`, `… failed 30s ago: <error>`,
     `… no ping yet`, `… pings off`); the icon is `--err` (class `bad`) when
     the last ping failed or was skipped, `--muted` otherwise. No brand logo.
+  - GitHub (between Tailscale and the theme toggle, always shown): a link
+    styled as `.btn.icon` with the GitHub mark; opens the project repository
+    (`Cargo.toml` `repository`) in a new tab.
 - Host panel (dashboard, above the toolbar): see below.
 - Toolbar (dashboard): filter input and a `show stopped` checkbox. Stopped
   services are hidden by default (only `running` / `restarting` / `paused`
@@ -217,7 +221,10 @@ room. One component (`.split`, `splitter()` in `app.js`), used in three places:
 Text labels win by default. The few icons (the eye, back arrow, sun/moon,
 bell, the Tailscale network glyph, the healthchecks.io pulse line) are hand-written inline SVGs: 14px
 in a 24-unit viewBox, `fill: none`, `stroke: currentColor`, round
-caps/joins, no fills except the pupil. Icon
+caps/joins, no fills except the pupil. The one exception is the GitHub
+mark, the official filled silhouette (16-unit viewBox, still 14px) with
+`.ico.fill` (`fill: currentColor`, no stroke) so it follows the theme like
+the rest. Icon
 buttons (`.btn.icon`) keep the box of a text `.btn`, are `--muted` until
 hover, and always carry `aria-label` + `title`.
 

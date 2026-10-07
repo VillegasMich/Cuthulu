@@ -62,7 +62,7 @@ src/
   lib.rs
   config.rs            CUTHULU_* env parsing (pure, unit-tested via a lookup fn)
   envfile.rs           optional ./.env reader layered under the real environment
-  build_info.rs        version (Cargo.toml) + git commit injected at build time
+  build_info.rs        version + repo URL (Cargo.toml) + git commit injected at build time
   model.rs             Service, ServiceId, ServiceState, Action, LogLine, …
   registry.rs          in-memory state, watch loop per provider, broadcast; MockProvider for tests
   server.rs            AppState, router, security headers; HTTP-level tests
@@ -538,7 +538,8 @@ Build time, not runtime: `CUTHULU_BUILD_SHA` (set from the image's `GIT_SHA`
 build arg) is compiled in as the commit shown in the footer and
 `/api/version`; without it only the version is shown. The version is
 `Cargo.toml`'s, bumped by the release workflow
-([DEPLOYMENT.md](DEPLOYMENT.md#releasing)).
+([DEPLOYMENT.md](DEPLOYMENT.md#releasing)). `Cargo.toml`'s `repository` is
+the topbar's GitHub link and the base of the footer's release-notes link.
 
 ## Security
 

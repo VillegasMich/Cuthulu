@@ -552,6 +552,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pages_link_the_github_repo_between_tailscale_and_theme() {
+        let (app, _) = app_with(vec![web()], false).await;
+        // Every page shell extends base.html; the mock has no service detail,
+        // so the not-found page stands in for the service page.
+        for path in ["/", "/services/docker:ghost"] {
+            let (_, _, page) = send(&app, get(path)).await;
+            let start = page.find(r#"<a id="github""#).expect("github link");
+            let link = &page[start..start + page[start..].find('>').unwrap()];
+            assert!(
+                link.contains(r#"href="https://github.com/VillegasMich/cuthulu""#),
+                "{link}"
+            );
+            assert!(link.contains(r#"target="_blank""#), "{link}");
+            assert!(link.contains(r#"rel="noopener noreferrer""#), "{link}");
+            assert!(!link.contains("hidden"), "{link}");
+            let at = |id: &str| page.find(&format!(r#"id="{id}""#)).unwrap();
+            assert!(at("tailscale") < at("github") && at("github") < at("theme"));
+        }
+    }
+
+    #[tokio::test]
     async fn system_snapshot_from_proc_dir() {
         let fake = crate::system::tests::FakeProc::new();
         let (app, _) = app_with_proc(&fake.0);
