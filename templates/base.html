@@ -25,10 +25,10 @@
     </a>
     {% block topbar %}{% endblock %}
     <span class="spacer"></span>
-    {% if read_only %}<span class="tag" title="CUTHULU_READ_ONLY is set">read-only</span>{% endif %}
+    {% if read_only %}<span id="read-only" class="tag" title="CUTHULU_READ_ONLY is set">read-only</span>{% endif %}
     <button id="notify" class="btn icon" type="button" title="notifications" aria-label="notifications"
             aria-haspopup="dialog" hidden></button>
-    <span id="conn" class="conn" data-state="pending">docker: connecting</span>
+    <span id="conn" class="conn" data-state="pending" title="docker: connecting">docker: connecting</span>
     <a id="healthcheck" class="btn icon" href="https://healthchecks.io/" target="_blank" rel="noopener noreferrer" title="healthchecks.io" aria-label="healthchecks.io" hidden>
       <svg class="ico" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
         <path d="M2 12h4.5l2.5-6 4.5 12 2.5-6H22"/>
@@ -56,13 +56,16 @@
         <path d="M20.5 14.5A8.5 8.5 0 1 1 9.5 3.5a7 7 0 0 0 11 11Z"/>
       </svg>
     </button>
+    <button id="more" class="btn more" type="button" aria-haspopup="menu" aria-expanded="false"
+            aria-controls="more-menu" title="more">more</button>
+    <div id="more-menu" class="menu" role="menu" aria-label="more" hidden></div>
   </header>
 
   <main>{% block main %}{% endblock %}</main>
 
   <footer class="foot">
     <span>cuthulu <a href="{{ crate::build_info::RELEASE_URL }}" title="release notes">v{{ version }}</a>{% if let Some(sha) = crate::build_info::short_sha() %} <span title="git commit">{{ sha }}</span>{% endif %}</span>
-    <span><kbd>?</kbd> shortcuts</span>
+    <span class="foot-keys"><kbd>?</kbd> shortcuts</span>
   </footer>
 
   <div id="flash" class="flash" role="status" aria-live="polite" hidden></div>

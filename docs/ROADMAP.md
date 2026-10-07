@@ -49,6 +49,7 @@ Each phase should end in something runnable. Tick items as they land.
 - [x] WCAG contrast pass (text ≥ 4.5:1, controls ≥ 3:1) and data colors (`--key`, `--project`, `--tag`)
 - [x] Resizable panes: splitters for the detail view's info column, the dashboard's table columns and host panel height (remembered per browser)
 - [x] Topbar link to this machine in the Tailscale admin console (`/api/tailscale`, tailscaled LocalAPI)
+- [x] Responsive layout: phones (two-line rows, topbar `more` menu, stacked detail), tablets / split screen, wide screens; bigger tap targets on touch
 
 ## Host panel ✓
 - [x] Read host CPU, memory, swap, load, uptime, network (addresses, ↓/↑ throughput) and disk I/O from procfs (`src/system/`, no external binaries)
