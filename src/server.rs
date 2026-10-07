@@ -403,6 +403,154 @@ mod tests {
         assert!(index.contains(r#"rel="noopener noreferrer""#));
     }
 
+    const PING_UUID: &str = "5bf0f1d6-0e1c-4a3c-9a3c-0c6a4c0b0b7e";
+
+    /// An app whose notifier is built from `CUTHULU_*` variables.
+    fn app_with_notify(env: &[(&str, &str)]) -> (Router, Arc<Notifier>) {
+        let mut env: std::collections::HashMap<_, _> = env
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        env.insert("CUTHULU_DATA_DIR".into(), "/nonexistent/cuthulu".into());
+        let config = Config::from_lookup(|k| env.get(k).cloned()).unwrap();
+        let notifier = Notifier::new(&config);
+        let shutdown = CancellationToken::new();
+        let app = router(AppState {
+            registry: Registry::new(vec![]),
+            system: SystemMonitor::new(&config, shutdown.clone()),
+            config: Arc::new(config),
+            shutdown,
+            todos: Arc::new(TodoStore::open(std::path::Path::new(
+                "/nonexistent/cuthulu",
+            ))),
+            notifier: Arc::clone(&notifier),
+            tailscale: Arc::new(crate::tailscale::tests::disabled()),
+        });
+        (app, notifier)
+    }
+
+    async fn healthcheck(app: &Router) -> (serde_json::Value, String) {
+        let (status, headers, body) = send(app, get("/api/healthcheck")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(headers[header::CONTENT_TYPE], "application/json");
+        assert!(
+            !body.contains(PING_UUID) && !body.contains("hc-ping"),
+            "{body}"
+        );
+        (serde_json::from_str(&body).unwrap(), body)
+    }
+
+    #[tokio::test]
+    async fn healthcheck_hidden_without_ping_url() {
+        for env in [
+            &[][..],
+            &[("CUTHULU_HEALTHCHECK_LINK", "https://healthchecks.io/")][..],
+        ] {
+            let (app, _) = app_with_notify(env);
+            let (st, _) = healthcheck(&app).await;
+            assert_eq!(
+                st,
+                serde_json::json!({
+                    "available": false,
+                    "url": null,
+                    "state": "off",
+                    "last_ping_at": null,
+                    "error": null,
+                })
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn healthcheck_links_to_the_dashboard_or_the_override() {
+        let url = format!("https://hc-ping.com/{PING_UUID}");
+        let (app, _) = app_with_notify(&[("CUTHULU_HEALTHCHECK_URL", &url)]);
+        let (st, _) = healthcheck(&app).await;
+        assert_eq!(st["available"], true);
+        assert_eq!(st["url"], "https://healthchecks.io/");
+        assert_eq!(st["state"], "pending");
+
+        let (app, _) = app_with_notify(&[
+            ("CUTHULU_HEALTHCHECK_URL", &url),
+            (
+                "CUTHULU_HEALTHCHECK_LINK",
+                "https://hc.example.com/projects/1/checks/",
+            ),
+        ]);
+        let (st, _) = healthcheck(&app).await;
+        assert_eq!(st["url"], "https://hc.example.com/projects/1/checks/");
+
+        let (app, _) = app_with_notify(&[
+            ("CUTHULU_HEALTHCHECK_URL", &url),
+            ("CUTHULU_NOTIFY_ENABLED", "false"),
+        ]);
+        let (st, _) = healthcheck(&app).await;
+        assert_eq!(
+            (&st["available"], &st["state"]),
+            (&true.into(), &"off".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn healthcheck_reports_the_latest_ping() {
+        use crate::notify::Outcome;
+        let url = format!("https://hc-ping.com/{PING_UUID}");
+        let (app, notifier) = app_with_notify(&[("CUTHULU_HEALTHCHECK_URL", &url)]);
+
+        notifier.record_ping(Outcome::Sent);
+        let (st, _) = healthcheck(&app).await;
+        assert_eq!(
+            (&st["state"], &st["error"]),
+            (&"ok".into(), &serde_json::Value::Null)
+        );
+        assert!(st["last_ping_at"].as_str().unwrap().ends_with('Z'));
+
+        notifier.record_ping(Outcome::Failed("io: Connection refused".into()));
+        let (st, _) = healthcheck(&app).await;
+        assert_eq!(st["state"], "failed");
+        assert_eq!(st["error"], "io: Connection refused");
+
+        notifier.record_ping(Outcome::Skipped);
+        let (st, _) = healthcheck(&app).await;
+        assert_eq!(st["state"], "skipped");
+
+        notifier.record_ping(Outcome::Sent);
+        let (st, _) = healthcheck(&app).await;
+        assert_eq!(st["state"], "ok");
+    }
+
+    #[tokio::test]
+    async fn failed_test_ping_shows_without_the_ping_url() {
+        // Nothing listens on the discard port.
+        let url = format!("http://127.0.0.1:9/{PING_UUID}");
+        let (app, _) = app_with_notify(&[("CUTHULU_HEALTHCHECK_URL", &url)]);
+        let (status, _, body) = send(&app, post("/api/notify/test")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(!body.contains(PING_UUID), "{body}");
+
+        let (st, body) = healthcheck(&app).await;
+        assert_eq!(st["state"], "failed", "{body}");
+        assert!(!body.contains("127.0.0.1:9"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn pages_have_a_hidden_healthcheck_button() {
+        let url = format!("https://hc-ping.com/{PING_UUID}");
+        let (app, _) = app_with_notify(&[("CUTHULU_HEALTHCHECK_URL", &url)]);
+        for path in ["/", &format!("/services/{}", web().id)] {
+            let (_, _, page) = send(&app, get(path)).await;
+            assert!(page.contains(r#"id="healthcheck""#), "{page}");
+            assert!(!page.contains(PING_UUID) && !page.contains("hc-ping"));
+        }
+        let (_, _, index) = send(&app, get("/")).await;
+        let button = &index[index.find(r#"id="healthcheck""#).unwrap()..];
+        let tag = &button[..button.find('>').unwrap()];
+        assert!(
+            tag.contains(" hidden") && tag.contains(r#"rel="noopener noreferrer""#),
+            "{tag}"
+        );
+    }
+
     #[tokio::test]
     async fn system_snapshot_from_proc_dir() {
         let fake = crate::system::tests::FakeProc::new();
