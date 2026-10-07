@@ -42,6 +42,9 @@ git clone https://github.com/VillegasMich/cuthulu && cd cuthulu
 DOCKER_GID=$(stat -c %g /var/run/docker.sock) docker compose up -d --build
 ```
 
+Or install it as a systemd service, enabled at boot: `scripts/install.sh`
+(see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#as-a-systemd-service)).
+
 Open <http://localhost/>, or `http://<machine>/` from your tailnet
 (optional HTTPS: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#https-on-the-tailnet)).
 

@@ -29,6 +29,7 @@ cargo clippy --all-targets -- -D warnings   # pedantic lints are on (Cargo.toml 
 cargo deny check                  # licenses, advisories, bans
 docker build -t cuthulu .
 DOCKER_GID=$(stat -c %g /var/run/docker.sock) docker compose up -d --build
+scripts/install.sh [--build]       # install as cuthulu.service (systemd, /etc/cuthulu); uninstall.sh removes it
 ```
 
 Run fmt, clippy and tests before considering a change done. CI

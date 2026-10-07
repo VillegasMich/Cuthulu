@@ -1,0 +1,28 @@
+# Runs Cuthulu with Docker Compose from /etc/cuthulu (compose.yaml + .env). Installed by
+# scripts/install.sh, which replaces @DOCKER@ with the path to the docker binary.
+#
+# systemd owns start/stop (boot, `systemctl stop`); the containers' `restart: unless-stopped`
+# still brings a crashed one back. Stopping the unit runs `compose down`: the containers go, the
+# volumes (TODOs, notification settings, tailscale identity) stay.
+[Unit]
+Description=Cuthulu dashboard (Docker Compose)
+Documentation=https://github.com/VillegasMich/cuthulu/blob/main/docs/DEPLOYMENT.md
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/etc/cuthulu
+ExecStart=@DOCKER@ compose --project-name cuthulu up --detach --wait --wait-timeout 120
+# `systemctl reload cuthulu` applies an edited .env or compose.yaml.
+ExecReload=@DOCKER@ compose --project-name cuthulu up --detach --wait --wait-timeout 120
+ExecStop=@DOCKER@ compose --project-name cuthulu down
+# A first start may pull images.
+TimeoutStartSec=300
+# compose.yaml gives the containers 15 s to stop (the shutdown email).
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

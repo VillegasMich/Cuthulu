@@ -117,6 +117,43 @@ published `127.0.0.1:8686`; existing deployments move from
 `DOCKER_GID` is needed because the image runs as an unprivileged user (uid
 65532); adding it to the socket's group is what lets it talk to Docker.
 
+## As a systemd service
+
+[`scripts/install.sh`](../scripts/install.sh) runs the same `compose.yaml`
+under systemd, as `cuthulu.service`
+([`deploy/systemd/cuthulu.service`](../deploy/systemd/cuthulu.service)),
+enabled at boot. Run it from a checkout as your normal user; it uses sudo only
+for system changes:
+
+```sh
+scripts/install.sh                                    # pull villegasmich/cuthulu:latest
+IMAGE=villegasmich/cuthulu:1.2.3 scripts/install.sh   # pin a release (also how to upgrade)
+scripts/install.sh --build                            # build this checkout as cuthulu:local
+```
+
+It copies `compose.yaml` and the settings to `/etc/cuthulu`: `.env` is seeded
+from the checkout's `.env` (or `.env.example`), is root-only (mode 600), and
+gets `IMAGE` and `DOCKER_GID` filled in. A re-run keeps the installed `.env`
+(only `IMAGE` and `DOCKER_GID` are updated) unless you pass `--reconfigure`,
+re-copies `compose.yaml`, pulls or builds the image, and restarts the service.
+
+```sh
+sudo $EDITOR /etc/cuthulu/.env && sudo systemctl reload cuthulu   # change settings
+systemctl status cuthulu
+docker logs -f cuthulu
+scripts/uninstall.sh            # remove the service; keeps /etc/cuthulu, volumes, images
+scripts/uninstall.sh --purge    # also delete them (TODOs, notification settings, tailscale identity)
+```
+
+systemd decides when Cuthulu runs (boot, `systemctl start|stop|restart`);
+the containers' `restart: unless-stopped` still brings a crashed one back.
+Stopping the unit runs `docker compose down`, which removes the containers but
+keeps the volumes. The compose project is named `cuthulu`, so the service uses
+the same volumes as `docker compose up` from a checkout directory named
+`cuthulu`: switching from one to the other keeps your data. A `cuthulu`
+container from `docker run`, or from a compose project with another name,
+blocks the install; remove it first (`docker rm -f cuthulu`; its volume stays).
+
 ## Plain docker run
 
 ```sh

@@ -3,9 +3,10 @@
 # ── build: static musl binary ────────────────────────────────
 # Runs on the build machine's platform and cross-compiles for the target
 # one (linux/amd64 or linux/arm64), so multi-arch builds need no emulation.
-# Everything is pure Rust; arm64 links with the toolchain's rust-lld.
+# arm64 links with the toolchain's rust-lld; ring (rustls' crypto, via lettre
+# and ureq) has C/asm that clang cross-compiles for it.
 FROM --platform=$BUILDPLATFORM rust:1-alpine AS build
-RUN apk add --no-cache musl-dev
+RUN apk add --no-cache musl-dev clang
 ARG TARGETARCH
 RUN case "$TARGETARCH" in \
       amd64) triple=x86_64-unknown-linux-musl ;; \
@@ -14,7 +15,8 @@ RUN case "$TARGETARCH" in \
     esac \
  && rustup target add "$triple" \
  && echo "$triple" >/triple
-ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld
+ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld \
+    CC_aarch64_unknown_linux_musl=clang
 WORKDIR /src
 
 COPY Cargo.toml Cargo.lock ./
