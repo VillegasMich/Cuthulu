@@ -209,6 +209,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn actions_work_with_a_port_less_host() {
+        // compose publishes port 80, so a tailnet browser sends a port-less
+        // Host and Origin; a proxy in front may add X-Forwarded-* headers.
+        let (app, _) = app_with(vec![web()], false).await;
+        let host = "box.tail1234.ts.net";
+        let stop_from = |origin: &str| {
+            Request::post(format!("/api/services/{}/stop", web().id))
+                .header(header::HOST, host)
+                .header(header::ORIGIN, origin)
+                .header("sec-fetch-site", "same-origin")
+                .header("x-forwarded-host", host)
+                .header("x-forwarded-for", "100.64.0.7")
+                .header(api::CSRF_HEADER, "1")
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        let (status, _, body) = send(&app, stop_from("http://evil.example")).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+        let (status, _, body) = send(&app, stop_from(&format!("http://{host}"))).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    #[tokio::test]
     async fn read_only_blocks_actions() {
         let (app, _) = app_with(vec![web()], true).await;
         let (status, _, _) = send(&app, post(&format!("/api/services/{}/start", web().id))).await;
