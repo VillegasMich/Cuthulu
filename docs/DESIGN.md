@@ -9,7 +9,8 @@ theme — not a SaaS landing page.
 1. **Information density over decoration.** A table row per service, not a
    card per service.
 2. **Text first.** Status is a word plus a small colored marker, never color
-   alone.
+   alone. (One exception: phone rows show running services as a dot only;
+   see [Screen sizes](#screen-sizes).)
 3. **Quiet by default, loud when broken.** Healthy services are visually
    calm; stopped/unhealthy ones stand out.
 4. **Keyboard is first class.** Everything reachable without a mouse.
@@ -133,11 +134,12 @@ stores an explicit choice in `localStorage` and sets `data-theme` on `<html>`.
   rows show); the counts keep the full totals and mark the hidden part. The
   choice is stored in `localStorage` (`cuthulu.index.stopped`).
 - Main: sortable table. Sticky header. Row actions appear on hover/focus
-  (`start` / `stop` / `restart` as small text buttons). Column widths are
+  (`start` / `stop` / `restart` as small text buttons); not on touch
+  screens or phones, where tapping a row opens its detail page. Column widths are
   adjustable with header splitters (see [Splitters](#splitters)).
 - Detail view: two panes — metadata on the left (narrow, 360px by default),
-  logs on the right (wide), with a splitter between them. On small screens
-  they stack.
+  logs on the right (wide), with a splitter between them. At 1100px and
+  below they stack (see [Screen sizes](#screen-sizes)).
   - Metadata is a key/value list: keys in `--key`, values in `--text`, a
     1px `--border` rule under each row (not the last). Project in
     `--project`, image tag in `--tag`; in ports the host address and `/proto`
@@ -182,6 +184,65 @@ stores an explicit choice in `localStorage` and sets `data-theme` on `<html>`.
   `--muted` and struck through. An input + `add` button below; Enter adds.
   The list scrolls past 40vh. No new color tokens.
 
+## Screen sizes
+
+Three tiers, plus touch rules. No content max-width: wide and ultra-wide
+screens use the full width. No horizontal page scroll at any width from
+320px; long values wrap (`overflow-wrap: anywhere`) or ellipsize instead.
+
+| Tier | Width | Dashboard | Detail |
+|------|-------|-----------|--------|
+| Desktop | > 1100px | all columns, fixed table layout with `--col-*`, column splitters | two panes, splitter, each pane scrolls on its own |
+| Tablet / split screen | 601–1100px | `state`, `name`, `image`, `uptime` (+ actions); no `project` / `ports`; auto layout, stored column widths ignored, no splitters | stacked, the page scrolls |
+| Phone | ≤ 600px | two-line rows (below), no table header | stacked, the page scrolls |
+
+- **Stacked detail** (≤ 1100px): name, state line, action buttons, the full
+  metadata list, then the logs box (70vh, scrolls on its own), then `todo`,
+  `env`, `labels` (still `<details>`). Nothing else is collapsed.
+- **Phone rows** — still a dense list: no cards, no extra borders, shadows
+  or rounding; one `--border` rule per row, as in the table.
+
+  ```
+  ● auto-git-commit-tool                 1d 0h [bell]
+    villegasmich/auto-git-commit-tool:0.2.0
+  ● cuthulu (this)                     10h 25m
+    villegasmich/cuthulu:0.1.1         cuthulu
+  ● cuthulu-test          exit 1 · 10m ago     [bell]
+    alpine
+  ```
+
+  Line 1: state dot, full name (ellipsized only when longer than the row;
+  `↻` and `(this)` kept), uptime right-aligned. Line 2: image with its tag
+  in `--tag`, project in `--project` at the right, both ellipsized. The
+  bell stays at the far right. Running rows show the dot only — calm; the
+  state word stays in the cell's text for screen readers and in its
+  tooltip. Every other row puts the state word in its status color before
+  the uptime (`exit 1 · 10m ago`, `paused · 3m`, `unhealthy · 2h`). Ports
+  are on the detail page.
+- **Phone topbar**: one line — back, the eye (the word `cuthulu` is
+  visually hidden but stays the link's name), short counts `7/11 up` (plus
+  ` · 1 failing`; the full text is the tooltip and what screen readers
+  read), the connection dot (provider text visually hidden, kept for
+  screen readers and the tooltip), theme toggle and a `more` text `.btn`
+  (`aria-haspopup="menu"`, `aria-expanded`). `more` opens a menu box like
+  the help dialog's (`--surface`, 1px `--border`, no shadow, no rounding)
+  listing `notifications`, `healthchecks.io`, `tailscale`, `github` — each
+  only while its topbar button would be shown — and a `--warn` `read-only`
+  line in read-only mode. Arrow keys / Home / End move between items; Esc
+  or a tap outside closes it. On the detail page `/ <name>` ellipsizes on
+  one line. Above 600px the topbar is unchanged and `more` is hidden.
+- **Phone log toolbar**: filter, `follow` and an `opts` text button that
+  shows a second row with `time`, `wrap`, `color`, `clear` and the stream
+  status (`opts` is `.on` while open; not remembered).
+- **Touch** (`hover: none`): rows do not reveal start / stop / restart —
+  tapping a row (anywhere) opens the detail page, which has start /
+  restart / stop / notify. Bells behave as before (always shown). With a
+  coarse pointer as well (`(hover: none) and (pointer: coarse)`): buttons,
+  inputs, checkboxes, menu items, todo toggles and bells get a hit area of
+  at least 36px through padding / min-height only (font sizes unchanged),
+  and the footer's `? shortcuts` hint is hidden (`?` still opens the help
+  with a keyboard).
+
 ## Splitters
 
 Pane borders that can be dragged, so clipped text and boxes can be given more
@@ -201,7 +262,7 @@ room. One component (`.split`, `splitter()` in `app.js`), used in three places:
   the cursor is `col-resize` / `row-resize`.
 - **Columns** trade width with their neighbour only: dragging a border
   moves just that border. `name` has no width of its own and takes what is
-  left. Widths are a fixed table layout above 900px.
+  left. Widths are a fixed table layout above 1100px.
 - **Host panel** heights snap to whole text lines, so no row is cut in half.
   Dragging back to full height forgets the limit.
 - **Keyboard:** each splitter is focusable (`role="separator"`,
@@ -212,7 +273,7 @@ room. One component (`.split`, `splitter()` in `app.js`), used in three places:
   sizes as CSS custom properties (`--split-meta`, `--split-sys`, `--col-*`)
   before first paint, so nothing jumps on load. Without storage, sizes last
   for the page.
-- **Narrow screens** (≤ 900px), where the detail panes stack and the table
+- **Narrow screens** (≤ 1100px), where the detail panes stack and the table
   drops columns, hide the detail and column splitters and ignore stored
   column widths.
 
@@ -258,11 +319,13 @@ in `localStorage` (`cuthulu.sys.open`), as is the process sort
   1-minute load number uses load ÷ cores at 70 / 100 %. Labels are `--key`
   (cyan, as in htop), brackets `--muted`.
 - CPU meters use enough columns to stay about four rows tall (2 columns for
-  ≤ 8 cores, up to 8); Mem/Swp span the CPU block's width. Below 600px one
-  column.
+  ≤ 8 cores, up to 8); Mem/Swp span the CPU block's width. At 600px and
+  below one column.
 - Info column: a label / value list (`dt` in `--key`). Rates are padded
   to a fixed width so the line does not jitter; the network tooltip gives
   Mbit/s. `↓` / `↑` are plain text glyphs.
+- At 600px and below, info values wrap rather than widen the page (a long
+  IPv6 address breaks inside its column; the kind label keeps its own).
 - Addresses: one per row, the default-route interface's first, each with a
   `--muted` kind label in an aligned column (`local`, `public`, `cgnat`,
   `tailscale`, `wireguard`, `zerotier`, `vpn`); the interface is in the
