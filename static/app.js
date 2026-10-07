@@ -382,11 +382,11 @@ function setConn() {
   if (down.length) {
     conn.dataset.state = "down";
     conn.textContent = `${down[0].provider}: disconnected`;
-    conn.title = down[0].error || "";
+    conn.title = [conn.textContent, down[0].error].filter(Boolean).join(": ");
   } else if (store.status.size) {
     conn.dataset.state = "ok";
     conn.textContent = [...store.status.keys()].join(" ");
-    conn.title = "connected";
+    conn.title = `${conn.textContent}: connected`;
   }
 }
 
@@ -426,7 +426,7 @@ function connect() {
     const conn = $("#conn");
     conn.dataset.state = "down";
     conn.textContent = "cuthulu: offline";
-    conn.title = "lost connection to the cuthulu server, retrying";
+    conn.title = "cuthulu: offline · lost connection to the cuthulu server, retrying";
   };
 }
 
@@ -519,10 +519,10 @@ function initIndex() {
         class: [UP.has(s.state) ? "" : "down", s.id === selected ? "sel" : ""].join(" ").trim() || null,
         onclick: () => (location.href = svcUrl(s.id)),
       },
-      el("td", { class: "c-state" }, el("span", { class: `st ${label.cls}` }, label.text)),
+      el("td", { class: "c-state", title: label.text }, el("span", { class: `st ${label.cls}` }, label.text)),
       el(
         "td",
-        { title: s.name },
+        { class: "c-name", title: s.name },
         restartsTag(s),
         el("a", { href: svcUrl(s.id), onclick: (e) => e.stopPropagation() }, s.name),
         s.is_self ? el("span", { class: "self" }, "(this)") : null,
@@ -530,7 +530,16 @@ function initIndex() {
       el("td", { class: "c-group", title: s.group || "" }, s.group || ""),
       el("td", { class: "c-image", title: s.image || "" }, ...imageParts(s.image)),
       el("td", { class: "c-ports" }, portsText(s.ports)),
-      el("td", { class: "c-up num" }, uptime(s)),
+      el(
+        "td",
+        { class: "c-up num" },
+        // Phone rows show the state as a word only when it is not plain running
+        // (screen readers get it from the state cell).
+        label.cls === "running"
+          ? null
+          : el("span", { class: `st st-word ${label.cls}`, "aria-hidden": "true" }, `${label.text} · `),
+        uptime(s),
+      ),
       el("td", { class: "c-act" }, ...actionButtons(s), bell(s)),
     );
   }
@@ -557,15 +566,28 @@ function initIndex() {
 
     const up = all.filter((s) => UP.has(s.state)).length;
     const bad = all.filter(isAlarming).length;
-    fill(
-      $("#counts"),
+    const failing = () => (bad ? el("span", { class: "bad" }, ` · ${bad} failing`) : null);
+    const full = el(
+      "span",
+      { class: "counts-full" },
       el("b", {}, String(up)),
       " running · ",
       el("b", {}, String(all.length - up)),
       " stopped",
       !showStopped.checked && all.length > up ? el("span", { class: "muted" }, " (hidden)") : null,
-      bad ? el("span", { class: "bad" }, ` · ${bad} failing`) : null,
+      failing(),
     );
+    // Phones show the short form; the full one stays in the tooltip.
+    const short = el(
+      "span",
+      { class: "counts-short", "aria-hidden": "true" },
+      el("b", {}, `${up}/${all.length}`),
+      " up",
+      failing(),
+    );
+    const counts = $("#counts");
+    fill(counts, full, short);
+    counts.title = full.textContent;
   };
 
   function move(delta) {
@@ -771,6 +793,14 @@ function initService() {
     if (atBottom !== follow) setFollow(atBottom);
   });
   followBtn.addEventListener("click", () => setFollow(!follow));
+  // Phones keep time / wrap / color / clear in a row behind `opts`.
+  const optsBtn = $("#log-opts");
+  optsBtn.addEventListener("click", () => {
+    const on = optsBtn.getAttribute("aria-expanded") !== "true";
+    optsBtn.setAttribute("aria-expanded", String(on));
+    optsBtn.classList.toggle("on", on);
+    $("#logbar").classList.toggle("opts-open", on);
+  });
   $("#log-clear").addEventListener("click", () => log.replaceChildren());
 
   let filterTimer;
@@ -1538,6 +1568,104 @@ function initHealthcheck() {
   tick();
 }
 
+// ── topbar "more" menu (phones) ────────────────────────────
+
+/**
+ * Phones fold the topbar's notifications / healthchecks.io / tailscale /
+ * github buttons into a `more` menu. Items are built on open from the
+ * buttons themselves, so only those currently shown are listed.
+ */
+function initMore() {
+  const button = $("#more");
+  const menu = $("#more-menu");
+  const items = () => [...menu.querySelectorAll("[role=menuitem]")];
+
+  function close(focusButton = false) {
+    if (menu.hidden) return;
+    menu.hidden = true;
+    button.setAttribute("aria-expanded", "false");
+    if (focusButton) button.focus();
+  }
+
+  function item(source, text) {
+    if (source.hidden) return null;
+    const bad = source.classList.contains("bad");
+    const common = { role: "menuitem", title: source.title, tabindex: "-1" };
+    if (source instanceof HTMLAnchorElement) {
+      return el(
+        "a",
+        {
+          ...common,
+          class: bad ? "bad" : null,
+          href: source.href,
+          target: "_blank",
+          rel: "noopener noreferrer",
+          onclick: () => close(),
+        },
+        text,
+      );
+    }
+    return el(
+      "button",
+      {
+        ...common,
+        type: "button",
+        onclick: () => {
+          close();
+          source.click();
+        },
+      },
+      text,
+    );
+  }
+
+  function open() {
+    const ro = $("#read-only");
+    fill(
+      menu,
+      ro ? el("div", { class: "menu-note", title: ro.title }, "read-only") : null,
+      item($("#notify"), "notifications"),
+      item($("#healthcheck"), "healthchecks.io"),
+      item($("#tailscale"), "tailscale"),
+      item($("#github"), "github"),
+    );
+    menu.hidden = false;
+    button.setAttribute("aria-expanded", "true");
+    items()[0]?.focus();
+  }
+
+  button.addEventListener("click", () => (menu.hidden ? open() : close()));
+  menu.addEventListener("keydown", (e) => {
+    // Keys in the menu are the menu's: no row selection, no Enter-opens-row.
+    e.stopPropagation();
+    const list = items();
+    const i = list.indexOf(document.activeElement);
+    const to = { ArrowDown: i + 1, ArrowUp: i - 1, Home: 0, End: list.length - 1 }[e.key];
+    if (to == null || !list.length) return;
+    e.preventDefault();
+    list[(to + list.length) % list.length].focus();
+  });
+  menu.addEventListener("focusout", (e) => {
+    if (!menu.contains(e.relatedTarget) && e.relatedTarget !== button) close();
+  });
+  document.addEventListener("pointerdown", (e) => {
+    if (!menu.contains(e.target) && !button.contains(e.target)) close();
+  });
+  // Capture, so Esc closes the menu before the page's own Esc (back) sees it.
+  window.addEventListener(
+    "keydown",
+    (e) => {
+      if (e.key !== "Escape" || menu.hidden) return;
+      e.preventDefault();
+      e.stopPropagation();
+      close(true);
+    },
+    true,
+  );
+  // Wider than a phone, the buttons are back in the topbar.
+  matchMedia("(max-width: 600px)").addEventListener("change", () => close());
+}
+
 // ── boot ───────────────────────────────────────────────────
 
 $("#theme").addEventListener("click", toggleTheme);
@@ -1545,6 +1673,7 @@ initBack();
 initNotify();
 initTailscale();
 initHealthcheck();
+initMore();
 document.addEventListener("keydown", (e) => {
   if (e.ctrlKey || e.metaKey || e.altKey || typing(e)) return;
   if (e.key === "t") toggleTheme();

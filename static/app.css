@@ -74,9 +74,10 @@
 
 * { box-sizing: border-box; }
 
-html, body { height: 100%; }
+html { height: 100%; }
 
 body {
+  min-height: 100%;
   margin: 0;
   display: flex;
   flex-direction: column;
@@ -189,7 +190,7 @@ body[data-page="index"]:not(.can-back) #back { visibility: hidden; }
 .check { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); cursor: pointer; }
 .check input { margin: 0; accent-color: var(--accent); }
 
-main { flex: 1; min-height: 0; padding: 12px 16px; }
+main { flex: 1 0 auto; padding: 12px 16px; }
 
 .toolbar { display: flex; gap: 8px; margin-bottom: 10px; }
 .toolbar #filter { flex: 0 1 420px; }
@@ -238,7 +239,7 @@ main { flex: 1; min-height: 0; padding: 12px 16px; }
 
 /* column widths set with the header splitters (--col-*, % of the table);
    a fixed layout makes them exact, and name takes what is left */
-@media (min-width: 901px) {
+@media (min-width: 1101px) {
   .services { table-layout: fixed; }
   .c-state { width: var(--col-state, 15ch); }
   .c-group { width: var(--col-group, 14%); }
@@ -269,7 +270,11 @@ main { flex: 1; min-height: 0; padding: 12px 16px; }
 
 /* ── detail ──────────────────────────────────────────────── */
 
-[data-page="service"] main { display: flex; }
+/* desktop: two panes filling the window, each scrolling on its own */
+@media (min-width: 1101px) {
+  body[data-page="service"] { height: 100%; }
+  [data-page="service"] main { display: flex; flex: 1 1 0; min-height: 0; }
+}
 
 .detail {
   flex: 1;
@@ -317,6 +322,12 @@ ul.plain { margin: 4px 0 0; padding-left: 2ch; list-style: none; }
   border-bottom: 1px solid var(--border);
 }
 .logbar #log-filter { width: 22ch; }
+/* the options row only exists on phones (`opts`); wider, its controls sit
+   in the bar in the order filter, time, wrap, color, follow, clear, status */
+.logopts { display: contents; }
+#log-opts { display: none; }
+#log-follow { order: 1; }
+#log-clear, .logopts .spacer, #log-status { order: 2; }
 
 .log { flex: 1; overflow: auto; padding: 4px 0; font-size: 12px; }
 .log .ln { padding: 0 8px; white-space: pre; }
@@ -498,12 +509,6 @@ button.todo-check:hover:not(:disabled) { color: var(--accent); }
 
 .empty { padding: 32px 0; color: var(--muted); }
 
-@media (max-width: 900px) {
-  .detail { grid-template-columns: 1fr; }
-  #split-meta, .col-split { display: none; }
-  .logs { min-height: 70vh; }
-  .c-group, .c-ports, .c-image { display: none; }
-}
 .services td a { color: inherit; }
 
 /* ── log colors: ANSI palette (SGR 30–37 / 90–97) and level keywords ── */
@@ -648,3 +653,135 @@ body.notify-off .bell-btn.on { border-color: var(--border); color: var(--muted);
 .notify-kv .btn { margin-left: 8px; padding: 0 6px; }
 .notify-test { margin-bottom: 6px; }
 .notify-dlg p { margin: 8px 0 0; }
+
+/* ── topbar "more" menu (phones) ─────────────────────────── */
+
+.more, .counts-short, .st-word { display: none; }
+.menu {
+  position: absolute;
+  top: 100%;
+  right: 12px;
+  z-index: 3;
+  min-width: 20ch;
+  padding: 4px 0;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+.menu[hidden] { display: none; }
+.menu [role="menuitem"], .menu-note {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 3px 16px;
+  font: inherit;
+  text-align: left;
+}
+.menu [role="menuitem"] { color: var(--text); background: none; border: 0; cursor: pointer; }
+.menu [role="menuitem"]:hover, .menu [role="menuitem"]:focus-visible {
+  background: var(--hover);
+  text-decoration: none;
+  outline: none;
+}
+.menu a.bad { color: var(--err); }
+.menu-note { color: var(--warn); }
+
+/* ── responsive: tablet / split screen ≤ 1100px, phone ≤ 600px ──
+   See "Layout" in docs/DESIGN.md. Desktop (> 1100px) is the default above. */
+
+/* touch: rows open the detail page, which has the actions; only bells stay */
+@media (hover: none) {
+  .services .c-act { width: 6ch; overflow: visible; text-overflow: clip; }
+  .services .c-act .btn { display: none; }
+}
+
+@media (max-width: 1100px) {
+  /* detail: one column the page scrolls; info, then logs, then todo / env / labels */
+  .detail { display: flex; flex-direction: column; gap: 16px; }
+  .meta { display: contents; }
+  .meta-head { order: 1; }
+  .logs { order: 2; height: 70vh; }
+  .meta-more { order: 3; }
+  .meta h1 { overflow-wrap: anywhere; }
+  .actions { flex-wrap: wrap; }
+  .kv { grid-template-columns: 9ch minmax(0, 1fr); }
+  .kv dd { overflow-wrap: anywhere; }
+  .logbar { flex-wrap: wrap; row-gap: 4px; }
+  #split-meta, .col-split { display: none; }
+  .c-group, .c-ports { display: none; }
+}
+
+@media (max-width: 600px) {
+  main { padding: 10px 12px; }
+
+  /* topbar: one line; the link buttons move into the `more` menu */
+  .topbar { gap: 8px; padding: 6px 12px; }
+  /* no reserved slot for a hidden back arrow: the room goes to the counts */
+  body[data-page="index"]:not(.can-back) #back { display: none; }
+  .topbar > * { flex: none; }
+  .topbar .spacer { flex: 1; }
+  #notify, #healthcheck, #tailscale, #github, #read-only { display: none; }
+  .more { display: inline-block; }
+  /* the eye alone; the word stays as the link's accessible name */
+  .brand span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .counts, .crumb { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .counts-short { display: inline; }
+  .counts-full { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  /* the dot only; the provider name stays in the text (screen readers) and the tooltip */
+  .conn { width: 2ch; overflow: hidden; white-space: nowrap; }
+
+  .toolbar #filter { flex: 1 1 0; min-width: 0; }
+  .toolbar .check { flex: none; white-space: nowrap; }
+
+  /* services: two lines per row — dot, name, uptime / image, project */
+  .services, .services tbody { display: block; }
+  .services thead { display: none; }
+  .services tbody tr {
+    display: grid;
+    grid-template-columns: 2ch minmax(0, 1fr) auto auto;
+    padding: 3px 4px;
+    border-bottom: 1px solid var(--border);
+  }
+  .services td { display: block; width: auto; max-width: none; padding: 0; border: 0; }
+  .services tr.placeholder { display: block; }
+  .services tr.placeholder td { padding: 3px 0; }
+  .services .c-state { grid-area: 1 / 1; text-overflow: clip; }
+  .services .c-name { grid-area: 1 / 2; }
+  .services .c-up { grid-area: 1 / 3; padding-left: 1ch; }
+  .services .c-act { grid-area: 1 / 4 / 3 / 5; align-self: center; width: auto; }
+  .services .c-image { grid-area: 2 / 2; }
+  .services .c-group { display: block; grid-area: 2 / 3; max-width: 18ch; padding-left: 1ch; text-align: right; }
+  .services .c-ports, .services .c-act .btn { display: none; }
+  .st-word { display: inline; }
+  .st.st-word::before { content: none; }
+
+  /* host panel: let long values wrap instead of widening the page */
+  .sys-toggle { flex: none; white-space: nowrap; }
+  .sys-head #sys-host { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sys-meters, .sys-info { min-width: 0; max-width: 100%; }
+  .sys-info { grid-template-columns: max-content minmax(0, 1fr); }
+  .sys-info dd { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .sys-info .addrs { grid-template-columns: minmax(0, max-content) max-content; }
+
+  /* logs: filter, follow, `opts`; the rest in a row `opts` shows */
+  .logbar { gap: 6px 8px; }
+  .logbar #log-filter { flex: 1 1 0; min-width: 0; width: auto; }
+  #log-opts { display: inline-block; }
+  #log-follow { order: 0; }
+  .logopts { display: none; flex: 1 0 100%; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
+  .logbar.opts-open .logopts { display: flex; }
+
+  .flash { left: 12px; right: 12px; max-width: none; }
+}
+
+/* touch screens: bigger hit areas (same font size), no keyboard hint */
+@media (hover: none) and (pointer: coarse) {
+  .foot-keys { display: none; }
+  .btn, .input, .check, .menu [role="menuitem"] { min-height: 36px; }
+  .btn.icon { height: 36px; min-width: 36px; }
+  .topbar { padding-top: 2px; padding-bottom: 2px; }
+  .services th { top: 41px; }
+  button.todo-check { min-width: 36px; min-height: 36px; }
+  .todo { align-items: center; }
+  button.bell { padding: 12px; margin: -12px -12px -12px -4px; }
+}
