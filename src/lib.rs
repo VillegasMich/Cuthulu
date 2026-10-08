@@ -2,7 +2,9 @@
 
 pub mod api;
 pub mod build_info;
+pub mod catalog;
 pub mod config;
+pub mod envedit;
 pub mod envfile;
 pub mod hosts;
 pub mod model;

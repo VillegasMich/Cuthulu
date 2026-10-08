@@ -8,6 +8,7 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use rust_embed::Embed;
 
+use crate::envedit::{Availability, EnvInfo};
 use crate::model::ServiceDetail;
 use crate::registry::RegistryError;
 use crate::server::AppState;
@@ -31,9 +32,20 @@ struct ServicePage {
     version: &'static str,
     read_only: bool,
     d: ServiceDetail,
+    /// The env file editor, for catalog services.
+    env: Option<EnvInfo>,
 }
 
 impl ServicePage {
+    /// `data-env` on the detail page: `ready`, `no-user`, or empty (no editor).
+    fn env_state(&self) -> &'static str {
+        match self.env.as_ref().map(|e| e.availability) {
+            Some(Availability::Ready) => "ready",
+            Some(Availability::NoUser) => "no-user",
+            None => "",
+        }
+    }
+
     fn short_id(&self) -> &str {
         let native = self.d.service.id.native();
         &native[..native.len().min(12)]
@@ -95,6 +107,7 @@ pub async fn service(State(st): State<AppState>, Path(id): Path<String>) -> Resp
         Ok(d) => render(&ServicePage {
             version: VERSION,
             read_only,
+            env: st.env_edit.info(&d.service),
             d,
         }),
         Err(RegistryError::NotFound(_)) => missing(format!("service `{id}` does not exist")),
@@ -215,6 +228,7 @@ mod tests {
                 env_keys: vec![],
                 labels: std::collections::BTreeMap::new(),
             },
+            env: None,
         };
         let html = page.render().unwrap();
         assert!(
@@ -226,5 +240,46 @@ mod tests {
             r#"<span class="muted">127.0.0.1:</span>8080->80<span class="muted">/tcp</span>"#
         ));
         assert!(html.contains(r#"<div>53<span class="muted">/udp</span></div>"#));
+    }
+
+    #[test]
+    fn service_page_offers_the_env_editor_only_when_told() {
+        let detail = |name: &str| ServiceDetail {
+            service: service(name, ServiceState::Running),
+            command: None,
+            created_at: None,
+            restart_policy: None,
+            restart_count: 0,
+            error: None,
+            mounts: vec![],
+            networks: vec![],
+            env_keys: vec!["TOKEN".into()],
+            labels: std::collections::BTreeMap::new(),
+        };
+        let page = |env| ServicePage {
+            version: VERSION,
+            read_only: false,
+            d: detail("tool"),
+            env,
+        };
+        let info = |availability| EnvInfo {
+            file: "/etc/tool/env".into(),
+            unit: "tool".into(),
+            scope: "system".into(),
+            availability,
+        };
+
+        let html = page(Some(info(Availability::Ready))).render().unwrap();
+        assert!(html.contains(r#"data-env="ready""#), "{html}");
+        assert!(html.contains(r#"<dialog id="env-dialog""#));
+        assert!(html.contains("<dd class=\"wrap\">/etc/tool/env</dd>"));
+        assert!(html.contains(r#"type="password""#));
+
+        let html = page(Some(info(Availability::NoUser))).render().unwrap();
+        assert!(html.contains(r#"data-env="no-user""#));
+
+        let html = page(None).render().unwrap();
+        assert!(html.contains(r#"data-env="""#));
+        assert!(!html.contains("env-dialog"));
     }
 }

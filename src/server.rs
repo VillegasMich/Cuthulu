@@ -11,6 +11,7 @@ use axum::routing::get;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::Config;
+use crate::envedit::EnvEditor;
 use crate::notify::Notifier;
 use crate::registry::Registry;
 use crate::system::SystemMonitor;
@@ -32,6 +33,8 @@ pub struct AppState {
     pub notifier: Arc<Notifier>,
     /// Link to this machine in the Tailscale admin console.
     pub tailscale: Arc<Tailscale>,
+    /// Password-gated env file editor for catalog services.
+    pub env_edit: Arc<EnvEditor>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -102,11 +105,20 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+    use crate::envedit::tests::{MockHost, editor as env_editor, test_catalog};
     use crate::model::{ProviderKind, Service, ServiceState};
     use crate::registry::tests::{MockProvider, service};
     use crate::tailscale::TTL;
 
     async fn app_with(services: Vec<Service>, read_only: bool) -> (Router, Arc<Registry>) {
+        app_with_env(services, read_only, EnvEditor::new(None, None, false)).await
+    }
+
+    async fn app_with_env(
+        services: Vec<Service>,
+        read_only: bool,
+        env_edit: EnvEditor,
+    ) -> (Router, Arc<Registry>) {
         let provider = Arc::new(MockProvider::with(services));
         let registry = Registry::new(vec![provider]);
         // Run the watch loop once so the registry holds the mock's services.
@@ -136,6 +148,7 @@ mod tests {
                 ..Config::default()
             }),
             tailscale: Arc::new(crate::tailscale::tests::disabled()),
+            env_edit: Arc::new(env_edit),
         });
         (app, registry)
     }
@@ -164,6 +177,163 @@ mod tests {
 
     fn web() -> Service {
         service("web", ServiceState::Running)
+    }
+
+    fn post_json(uri: &str, body: &serde_json::Value) -> Request<Body> {
+        Request::post(uri)
+            .header(api::CSRF_HEADER, "1")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    /// An app whose only catalog entry is the service `tool`, with `host`
+    /// standing in for the host.
+    async fn env_app(
+        host: &Arc<MockHost>,
+        read_only: bool,
+        host_user: Option<&str>,
+    ) -> (Router, String) {
+        let mut editor = env_editor(host, host_user);
+        if read_only {
+            editor = EnvEditor::with_catalog(
+                Some(Arc::clone(host) as Arc<dyn crate::providers::HostControl>),
+                test_catalog(),
+                None,
+                true,
+            );
+        }
+        let tool = service("tool", ServiceState::Running);
+        let base = format!("/api/services/{}/env", tool.id);
+        let (app, _) = app_with_env(vec![tool, web()], read_only, editor).await;
+        (app, base)
+    }
+
+    #[tokio::test]
+    async fn env_load_and_save() {
+        let host = Arc::new(MockHost::default());
+        let text = "# c\nIMAGE=me/tool:1\nGITHUB_TOKEN=ghp_x\n";
+        host.file(text);
+        let (app, base) = env_app(&host, false, Some("manuel")).await;
+
+        let (status, _, body) = send(
+            &app,
+            post_json(
+                &format!("{base}/load"),
+                &serde_json::json!({ "password": "pw" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let loaded: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(loaded["file"], "/etc/tool/env");
+        assert_eq!(loaded["user"], "manuel");
+        assert_eq!(loaded["vars"][1]["key"], "GITHUB_TOKEN");
+        assert_eq!(loaded["vars"][1]["secret"], true);
+        assert!(!body.contains("\"pw\""), "the password is never echoed");
+
+        host.file(text);
+        host.answer("write", 0, "", "");
+        let save = serde_json::json!({
+            "password": "pw",
+            "version": loaded["version"],
+            "vars": [{ "key": "IMAGE", "value": "me/tool:2" }],
+        });
+        let (status, _, body) = send(&app, post_json(&format!("{base}/save"), &save)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, r#"{"unit":"tool","restarting_self":false}"#);
+        let calls = host.calls.lock().unwrap();
+        assert_eq!(calls.last().unwrap().1, b"# c\nIMAGE=me/tool:2\n");
+    }
+
+    #[tokio::test]
+    async fn env_routes_refuse_read_only_cross_origin_and_get() {
+        let host = Arc::new(MockHost::default());
+        let (app, base) = env_app(&host, true, Some("manuel")).await;
+        let pw = serde_json::json!({ "password": "pw" });
+        for path in ["load", "save"] {
+            let (status, _, body) = send(&app, post_json(&format!("{base}/{path}"), &pw)).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{path}: {body}");
+            assert!(body.contains("read-only"), "{body}");
+        }
+
+        let (app, base) = env_app(&host, false, Some("manuel")).await;
+        let no_header = Request::post(format!("{base}/load"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(pw.to_string()))
+            .unwrap();
+        let (status, _, _) = send(&app, no_header).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let cross = Request::post(format!("{base}/load"))
+            .header(api::CSRF_HEADER, "1")
+            .header("host", "localhost:8686")
+            .header("origin", "http://evil.example")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(pw.to_string()))
+            .unwrap();
+        let (status, _, _) = send(&app, cross).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _, _) = send(&app, get(&format!("{base}/load"))).await;
+        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "never a GET");
+        assert_eq!(host.ops(), Vec::<&str>::new(), "nothing reached the host");
+    }
+
+    #[tokio::test]
+    async fn env_wrong_password_is_401_then_429() {
+        let host = Arc::new(MockHost::default());
+        let (app, base) = env_app(&host, false, Some("manuel")).await;
+        let pw = serde_json::json!({ "password": "nope" });
+        for _ in 0..crate::envedit::MAX_FAILURES {
+            host.answer("probe", 0, "0 root 4\n", "");
+            host.answer(
+                "read",
+                crate::envedit::host::EXIT_SUDO,
+                "",
+                "Sorry, try again.",
+            );
+            let (status, _, body) = send(&app, post_json(&format!("{base}/load"), &pw)).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+            assert!(body.contains("wrong password"), "{body}");
+        }
+        let (status, headers, body) = send(&app, post_json(&format!("{base}/load"), &pw)).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+        let retry: u64 = headers[header::RETRY_AFTER]
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((1..=300).contains(&retry), "{retry}");
+    }
+
+    #[tokio::test]
+    async fn env_refuses_services_outside_the_catalog_and_bad_bodies() {
+        let host = Arc::new(MockHost::default());
+        let (app, _) = env_app(&host, false, Some("manuel")).await;
+        let pw = serde_json::json!({ "password": "pw" });
+        let (status, _, body) = send(
+            &app,
+            post_json(&format!("/api/services/{}/env/load", web().id), &pw),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert!(body.contains("no editable env file"), "{body}");
+        let (status, _, _) = send(&app, post_json("/api/services/docker:gone/env/load", &pw)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let (app, base) = env_app(&host, false, Some("manuel")).await;
+        let bad = serde_json::json!({ "password": 1234, "extra": "hunter2" });
+        let (status, _, body) = send(&app, post_json(&format!("{base}/load"), &bad)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            !body.contains("1234") && !body.contains("hunter2"),
+            "{body}"
+        );
+
+        let (app, base) = env_app(&host, false, None).await;
+        let (status, _, body) = send(&app, post_json(&format!("{base}/load"), &pw)).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(body.contains("CUTHULU_HOST_USER"), "{body}");
+        assert_eq!(host.ops(), Vec::<&str>::new());
     }
 
     #[tokio::test]
@@ -495,6 +665,7 @@ mod tests {
                 ..Config::default()
             }),
             tailscale: Arc::new(crate::tailscale::tests::disabled()),
+            env_edit: Arc::new(EnvEditor::new(None, None, false)),
         });
         (app, system)
     }
@@ -514,6 +685,7 @@ mod tests {
                 ..Config::default()
             }),
             tailscale: Arc::new(tailscale),
+            env_edit: Arc::new(EnvEditor::new(None, None, false)),
         })
     }
 
@@ -583,6 +755,7 @@ mod tests {
             ))),
             notifier: Arc::clone(&notifier),
             tailscale: Arc::new(crate::tailscale::tests::disabled()),
+            env_edit: Arc::new(EnvEditor::new(None, None, false)),
         });
         (app, notifier)
     }

@@ -11,6 +11,8 @@ use futures_util::stream::BoxStream;
 
 use crate::model::{Action, LogLine, LogOptions, ProviderKind, Service, ServiceDetail, ServiceId};
 
+use std::time::Duration;
+
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 #[derive(Debug, thiserror::Error)]
@@ -58,4 +60,52 @@ pub trait Provider: Send + Sync {
     /// Change notifications. The stream ends or yields an error when the
     /// connection to the backend is lost; the caller re-subscribes.
     fn events(&self) -> BoxStream<'static, Result<ProviderEvent>>;
+}
+
+/// A `/bin/sh` script to run as root on the host, built only from fixed
+/// templates (see [`crate::envedit::host`]). It is visible to anyone who can
+/// inspect the helper, so it never holds a secret: those go through stdin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostScript {
+    /// Short name of the template, for logs and test doubles.
+    pub(crate) op: &'static str,
+    pub(crate) text: String,
+}
+
+/// What a host script did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HostOutput {
+    /// Exit status of the script.
+    pub status: i32,
+    pub stdout: Vec<u8>,
+    /// The end of stderr, bounded; may be lossy UTF-8.
+    pub stderr: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum HostError {
+    #[error("docker is unavailable: {0}")]
+    Unavailable(#[source] BoxError),
+    #[error("cannot pull the helper image {image}: {reason}")]
+    Image { image: String, reason: String },
+    #[error("the helper container failed: {0}")]
+    Helper(String),
+    #[error("the host command did not finish within {0:?}")]
+    Timeout(Duration),
+    #[error("the host command printed more than {0} bytes")]
+    TooMuchOutput(usize),
+}
+
+/// Runs commands on the host itself, outside any container. Used only for
+/// the password-gated env file editor; nothing else needs host access.
+#[async_trait]
+pub trait HostControl: Send + Sync {
+    /// Runs `script` as root on the host with `stdin` as its standard input
+    /// and returns its exit status and output.
+    async fn run(
+        &self,
+        script: &HostScript,
+        stdin: &[u8],
+        timeout: Duration,
+    ) -> std::result::Result<HostOutput, HostError>;
 }

@@ -147,6 +147,7 @@ mod tests {
             }),
             shutdown,
             tailscale: Arc::new(crate::tailscale::tests::disabled()),
+            env_edit: Arc::new(crate::envedit::EnvEditor::new(None, None, false)),
         })
     }
 

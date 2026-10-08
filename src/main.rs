@@ -7,9 +7,11 @@ use std::time::Duration;
 use anyhow::Context;
 use cuthulu::build_info;
 use cuthulu::config::Config;
+use cuthulu::envedit::EnvEditor;
 use cuthulu::envfile::{self, EnvFile};
 use cuthulu::notify::Notifier;
 use cuthulu::providers::docker::DockerProvider;
+use cuthulu::providers::{HostControl, Provider};
 use cuthulu::registry::Registry;
 use cuthulu::server::{self, AppState};
 use cuthulu::system::SystemMonitor;
@@ -77,10 +79,18 @@ fn main() -> anyhow::Result<ExitCode> {
 
 async fn run(env: &EnvFile) -> anyhow::Result<()> {
     let config = Config::from_lookup(|k| env.lookup(k))?;
-    let docker = DockerProvider::connect(&config.docker_host)
-        .with_context(|| format!("cannot use docker at {}", config.docker_host))?;
+    let docker = Arc::new(
+        DockerProvider::connect(&config.docker_host)
+            .with_context(|| format!("cannot use docker at {}", config.docker_host))?
+            .with_helper_image(config.helper_image.clone()),
+    );
 
-    let registry = Registry::new(vec![Arc::new(docker)]);
+    let registry = Registry::new(vec![Arc::clone(&docker) as Arc<dyn Provider>]);
+    let env_edit = Arc::new(EnvEditor::new(
+        Some(docker as Arc<dyn HostControl>),
+        config.host_user.clone(),
+        config.read_only,
+    ));
     let todos = Arc::new(TodoStore::open(&config.data_dir));
     let shutdown = CancellationToken::new();
     let notifier = Notifier::new(&config);
@@ -95,6 +105,7 @@ async fn run(env: &EnvFile) -> anyhow::Result<()> {
         version = build_info::VERSION,
         git_sha = build_info::git_sha().unwrap_or("unknown"),
         read_only = config.read_only,
+        host_user = config.host_user.as_ref().map(ToString::to_string),
         "listening on http://{}",
         listener.local_addr()?
     );
@@ -109,6 +120,7 @@ async fn run(env: &EnvFile) -> anyhow::Result<()> {
         todos,
         notifier: Arc::clone(&notifier),
         tailscale,
+        env_edit,
     });
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal(shutdown.clone()))
