@@ -243,6 +243,53 @@ out=$(run "$fake_install; companions_pick_list alpha; companions_step alpha && e
 check_contains "only the listed one is installed" "INSTALL alpha" "$out"
 check_contains "all succeeded: rc 0" "rc=0" "$out"
 
+# --- --companions-only -----------------------------------------------------------------------
+# main against the real catalog, with Cuthulu's install replaced by a tripwire and
+# companion_install faked. Prints the output and the exit code.
+run_main() {
+  bash -c 'source "$1"; shift
+    install_cuthulu() { echo "CUTHULU INSTALLED"; exit 99; }
+    companion_install() { echo "INSTALL $1"; }
+    eval "${PRE:-}"
+    main "$@"' _ "$INSTALL" "$@" 2>&1 </dev/null && echo rc=0 || echo "rc=$?"
+}
+out=$(run_main --companions-only --companions producer-tag-on-merge)
+check "--companions-only installs the listed companion only, not Cuthulu" \
+  "INSTALL producer-tag-on-merge" "$(grep -E 'INSTALL|CUTHULU' <<<"$out")"
+check_contains "--companions-only succeeds" "rc=0" "$out"
+out=$(run_main --companions=all --companions-only)
+check "--companions-only --companions=all installs every companion" \
+  "INSTALL auto-git-commit-tool
+INSTALL claude-session-starter
+INSTALL producer-tag-on-merge" "$(grep -E 'INSTALL|CUTHULU' <<<"$out")"
+out=$(run_main --companions-only)
+check_contains "--companions-only without a terminal: hint" \
+  "Companion services skipped (no terminal)" "$out"
+check_contains "--companions-only without a terminal: Cuthulu untouched" "rc=0" "$out"
+out=$(PRE='is_root() { true; }' run_main --companions-only --companions all)
+check_contains "--companions-only as root: hint" "run scripts/install.sh as your normal user" "$out"
+check "--companions-only as root: nothing installed" "" "$(grep -E 'INSTALL|CUTHULU' <<<"$out")"
+out=$(PRE='companion_install() { echo "INSTALL $1"; [[ $1 != claude-session-starter ]]; }' \
+  run_main --companions-only --companions all)
+check_contains "--companions-only: a failing companion fails the run" "rc=1" "$out"
+check_contains "without --companions-only, Cuthulu is installed (tripwire works)" \
+  "CUTHULU INSTALLED" "$(run_main --companions none)"
+for args in "--build" "--reconfigure" "--build --reconfigure"; do
+  # shellcheck disable=SC2086 # split the flags on purpose
+  out=$(run_main --companions-only $args --companions all)
+  check_contains "--companions-only rejects $args" \
+    "error: --companions-only does not install Cuthulu; drop --build and --reconfigure" "$out"
+  check "--companions-only $args changes nothing" "" "$(grep -E 'INSTALL|CUTHULU' <<<"$out")"
+done
+out=$(run_main --companions none --companions-only)
+check_contains "--companions-only rejects --companions none" \
+  "error: --companions-only with --companions none does nothing" "$out"
+check_contains "--companions-only --companions none exits 1" "rc=1" "$out"
+out=$("$INSTALL" --companions-only --build 2>&1 || true)
+check_contains "install.sh --companions-only --build stops before anything" \
+  "--companions-only does not install Cuthulu" "$out"
+check_contains "--help shows --companions-only" "--companions-only [--companions LIST]" "$help"
+
 # companion_install for real, against a local "remote": clone, then pull on the second run.
 mkdir -p "$TMP/remote/alpha/scripts"
 cat >"$TMP/remote/alpha/scripts/install.sh" <<'EOF'

@@ -172,6 +172,17 @@ scripts/install.sh --companions auto-git-commit-tool  # install without asking (
 scripts/install.sh --companions all                   # or none
 ```
 
+To add (or upgrade) companions later without touching Cuthulu, use
+`--companions-only`: it skips Cuthulu's own install (no image pull or build,
+no `/etc/cuthulu` writes, no restart of `cuthulu.service`, no sudo for it) and
+runs only this step, with the same prompt, rules and exit code. It can't be
+combined with `--build`, `--reconfigure` or `--companions none`.
+
+```sh
+scripts/install.sh --companions-only                                     # pick from the list
+scripts/install.sh --companions-only --companions producer-tag-on-merge  # without asking
+```
+
 Without a terminal on stdin (e.g. piped, or CI) and without `--companions`,
 the step is skipped with a hint. Run as root (`sudo scripts/install.sh`), it is
 skipped too: run the script as your normal user, since producer-tag-on-merge is

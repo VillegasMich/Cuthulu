@@ -35,3 +35,5 @@ is not active, else `not installed`.
 2. Check it: `scripts/install.sh --list-companions` lists it with its status
    (a malformed file is reported and skipped), and `scripts/test-companions.sh`
    still passes.
+3. Install it without reinstalling Cuthulu:
+   `scripts/install.sh --companions-only --companions <name>`.

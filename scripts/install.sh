@@ -2,6 +2,7 @@
 # Install Cuthulu as a systemd service (Docker Compose under systemd).
 #
 #   scripts/install.sh [--build] [--reconfigure] [--companions LIST]
+#   scripts/install.sh --companions-only [--companions LIST]
 #   scripts/install.sh --list-companions
 #
 #   --build            build the image from this checkout (tagged cuthulu:local) instead of pulling
@@ -11,6 +12,8 @@
 #   --companions LIST  companion services to install after Cuthulu, without asking: names
 #                      separated by commas, `all` or `none`. Without it, a terminal gets a list to
 #                      pick from; no terminal (e.g. piped stdin) skips them.
+#   --companions-only  leave Cuthulu alone (no image, /etc/cuthulu, service restart or sudo for
+#                      it) and only offer, or install with --companions, the companion services.
 #   --list-companions  only show the companion services and whether each is running, installed
 #                      or not installed; changes nothing.
 #
@@ -441,7 +444,7 @@ main() {
   build=false
   reconfigure=false
   list_companions=false
-  local companions_flag=
+  local companions_only=false companions_flag=
   while (($#)); do
     case $1 in
       --build) build=true ;;
@@ -455,12 +458,19 @@ main() {
         companions_flag=${1#*=}
         [[ -n $companions_flag ]] || die "--companions needs a list (names, all or none)"
         ;;
+      --companions-only) companions_only=true ;;
       --list-companions) list_companions=true ;;
-      -h | --help) sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+      -h | --help) sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
       *) die "unknown argument '$1' (try --help)" ;;
     esac
     shift
   done
+
+  if [[ $companions_only == true ]]; then
+    [[ $build == false && $reconfigure == false ]] \
+      || die "--companions-only does not install Cuthulu; drop --build and --reconfigure"
+    [[ $companions_flag != none ]] || die "--companions-only with --companions none does nothing"
+  fi
 
   # Before anything is installed, so a typo in --companions changes nothing.
   companions_load "$COMPANIONS_CATALOG"
@@ -473,7 +483,7 @@ main() {
     companions_pick_list "$companions_flag" || die "invalid --companions '$companions_flag'"
   fi
 
-  install_cuthulu
+  [[ $companions_only == true ]] || install_cuthulu
   companions_step "$companions_flag"
 }
 
