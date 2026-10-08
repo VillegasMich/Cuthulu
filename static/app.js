@@ -671,7 +671,7 @@ function initService() {
       s.is_self ? el("span", { class: "muted" }, " · this is cuthulu") : null,
       restartsTag(s, true),
     );
-    fill($("#actions"), ...actionButtons(s, { all: true }), bell(s, { text: true }));
+    fill($("#actions"), ...actionButtons(s, { all: true }), bell(s, { text: true }), envButton());
     for (const t of document.querySelectorAll(".time[data-time]")) {
       if (t.dataset.time) {
         t.textContent = fmtAgo(t.dataset.time);
@@ -826,6 +826,8 @@ function initService() {
 
   document.addEventListener("keydown", (e) => {
     if (e.ctrlKey || e.metaKey || e.altKey) return;
+    // A dialog handles its own keys (Esc closes it, not the page).
+    if (document.querySelector("dialog[open]")) return;
     if (typing(e)) {
       if (e.key === "Escape") e.target.blur();
       return;
@@ -1173,6 +1175,251 @@ function initTodos() {
 }
 
 if (page === "service") initTodos();
+
+// ── env file editor (catalog services) ─────────────────────
+
+// Mirrors envedit::file::is_secret and valid_key on the server, which
+// re-checks everything.
+const ENV_SECRET = /TOKEN|PASSWORD|PASS|SECRET|KEY|URL|AUTH/i;
+const ENV_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+const envEdit = {
+  open: null,
+};
+
+/** The `edit env` button of the detail page, or null when not offered. */
+function envButton() {
+  const state = $("#detail")?.dataset.env;
+  if (!state || readOnly) return null;
+  const noUser = state === "no-user";
+  return el(
+    "button",
+    {
+      class: "btn",
+      type: "button",
+      disabled: noUser,
+      "aria-haspopup": "dialog",
+      title: noUser
+        ? "set CUTHULU_HOST_USER (your user on the host) to edit env files; scripts/install.sh does"
+        : "edit the env file and restart the unit (asks for the sudo password)",
+      onclick: () => envEdit.open?.(),
+    },
+    "edit env",
+  );
+}
+
+function initEnvEdit() {
+  const dialog = $("#env-dialog");
+  if (!dialog) return;
+  const id = $("#detail").dataset.id;
+  const base = `/api/services/${encodeURIComponent(id)}/env`;
+  const unlock = $("#env-unlock");
+  const input = $("#env-password");
+  const body = $("#env-body");
+  const status = $("#env-status");
+  const save = $("#env-save");
+  // Lives only while the dialog is open; closing it forgets everything.
+  let st = null;
+
+  function say(msg, cls = "") {
+    status.className = `wrap ${cls}`.trim();
+    status.textContent = msg;
+  }
+
+  async function post(path, payload) {
+    const res = await fetch(`${base}/${path}`, {
+      method: "POST",
+      headers: { "X-Cuthulu": "1", "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw Object.assign(new Error(data.error || res.statusText), { status: res.status });
+    return data;
+  }
+
+  function reset() {
+    st = null;
+    input.value = "";
+    unlock.hidden = false;
+    save.hidden = true;
+    body.replaceChildren();
+    say("");
+  }
+
+  function setBusy(on) {
+    st && (st.busy = on);
+    for (const b of dialog.querySelectorAll("button, input")) {
+      if (b.id !== "env-cancel") b.disabled = on;
+    }
+  }
+
+  function row(v) {
+    const masked = v.secret && !v.shown;
+    const value = el("input", {
+      class: "input",
+      type: masked ? "password" : "text",
+      value: v.value,
+      autocomplete: "off",
+      spellcheck: "false",
+      "aria-label": `value of ${v.key}`,
+      oninput: (e) => (v.value = e.target.value),
+    });
+    return el(
+      "div",
+      { class: "env-row" },
+      el("span", { class: "env-key wrap", title: v.key }, v.key),
+      value,
+      v.secret
+        ? el(
+            "button",
+            {
+              class: v.shown ? "btn on" : "btn",
+              type: "button",
+              "aria-pressed": v.shown ? "true" : "false",
+              "aria-label": `${v.shown ? "hide" : "show"} ${v.key}`,
+              onclick: () => {
+                v.shown = !v.shown;
+                draw();
+                body.querySelector(`[aria-label="value of ${CSS.escape(v.key)}"]`)?.focus();
+              },
+            },
+            v.shown ? "hide" : "show",
+          )
+        : el("span"),
+      el(
+        "button",
+        {
+          class: "btn danger",
+          type: "button",
+          "aria-label": `delete ${v.key}`,
+          onclick: () => {
+            st.vars = st.vars.filter((x) => x !== v);
+            draw();
+            $("#env-new-key")?.focus();
+          },
+        },
+        "del",
+      ),
+    );
+  }
+
+  function draw() {
+    const key = el("input", {
+      id: "env-new-key",
+      class: "input",
+      type: "text",
+      placeholder: "NEW_KEY",
+      autocomplete: "off",
+      spellcheck: "false",
+      maxlength: "200",
+      "aria-label": "new variable name",
+    });
+    const value = el("input", {
+      class: "input",
+      type: "text",
+      placeholder: "value",
+      autocomplete: "off",
+      spellcheck: "false",
+      "aria-label": "new variable value",
+    });
+    const add = el(
+      "form",
+      {
+        class: "env-row env-add",
+        autocomplete: "off",
+        onsubmit: (e) => {
+          e.preventDefault();
+          const k = key.value.trim();
+          if (!ENV_KEY.test(k)) return say(`${k || "the name"}: letters, digits and _, not starting with a digit`, "err");
+          if (st.vars.some((v) => v.key === k)) return say(`${k} is already set`, "err");
+          st.vars.push({ key: k, value: value.value, secret: ENV_SECRET.test(k), shown: true });
+          say("");
+          draw();
+          $("#env-new-key").focus();
+        },
+      },
+      key,
+      value,
+      el("span"),
+      el("button", { class: "btn", type: "submit" }, "add"),
+    );
+    fill(
+      body,
+      el(
+        "p",
+        { class: "muted wrap" },
+        `${st.vars.length} variables · unlocked as ${st.user} · values are written exactly as typed (no quoting)`,
+      ),
+      el("div", { class: "env-list", role: "group", "aria-label": "variables" }, ...st.vars.map(row), add),
+    );
+  }
+
+  envEdit.open = () => {
+    reset();
+    dialog.showModal();
+    input.focus();
+  };
+
+  unlock.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (st?.busy) return;
+    const password = input.value;
+    if (!password) return say("enter the sudo password", "err");
+    st = { busy: false };
+    setBusy(true);
+    say("checking…", "muted");
+    try {
+      const data = await post("load", { password });
+      if (!dialog.open) return;
+      st = {
+        password,
+        version: data.version,
+        user: data.user,
+        unit: data.unit,
+        file: data.file,
+        vars: data.vars.map((v) => ({ ...v, shown: false })),
+        busy: false,
+      };
+      input.value = "";
+      unlock.hidden = true;
+      save.hidden = false;
+      say("");
+      draw();
+      body.querySelector(".env-row input")?.focus();
+    } catch (err) {
+      st = null;
+      input.select();
+      say(err.message, "err");
+    } finally {
+      setBusy(false);
+    }
+  });
+
+  save.addEventListener("click", async () => {
+    if (!st || st.busy) return;
+    const self = $("#detail").dataset.self === "true";
+    const what = self
+      ? `write ${st.file} and restart cuthulu itself? the page will reconnect.`
+      : `write ${st.file} and restart ${st.unit}?`;
+    if (!confirm(what)) return;
+    setBusy(true);
+    say(`saving and restarting ${st.unit}…`, "muted");
+    try {
+      const vars = st.vars.map(({ key, value }) => ({ key, value }));
+      const res = await post("save", { password: st.password, version: st.version, vars });
+      const unit = st.unit;
+      dialog.close();
+      flash(res.restarting_self ? "env saved · cuthulu is restarting, reconnecting…" : `env saved · ${unit} restarted`);
+    } catch (err) {
+      say(err.message, "err");
+      setBusy(false);
+    }
+  });
+
+  $("#env-cancel").addEventListener("click", () => dialog.close());
+  dialog.addEventListener("close", reset);
+}
+if (page === "service") initEnvEdit();
 
 // ── notifications (bells, desktop alerts, settings dialog) ─
 
