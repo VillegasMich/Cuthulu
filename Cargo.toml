@@ -1,6 +1,6 @@
 [package]
 name = "cuthulu"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "The eye that never sleeps: a self-hosted dashboard to monitor and control the services on your machine"
 license = "MIT"
