@@ -33,6 +33,7 @@ Each phase should end in something runnable. Tick items as they land.
 - [x] Publish image (`villegasmich/cuthulu`, amd64 + arm64) from CI on tags
 - [x] Release workflow: Conventional Commits semver bump, GitHub release, Docker Hub push
 - [x] Version (and commit) in the footer, `GET /api/version`, OCI version/revision labels
+- [x] `scripts/install.sh` offers companion services from `deploy/companions/` (status, toggle prompt, `--companions`, `--list-companions`)
 
 ## Phase 5 — Polish
 - [x] Keyboard shortcuts
