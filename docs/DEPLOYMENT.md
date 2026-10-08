@@ -154,6 +154,54 @@ the same volumes as `docker compose up` from a checkout directory named
 container from `docker run`, or from a compose project with another name,
 blocks the install; remove it first (`docker rm -f cuthulu`; its volume stays).
 
+### Companion services
+
+After Cuthulu is up, `install.sh` offers related services that can run next to
+it: [producer-tag-on-merge](https://github.com/VillegasMich/producer-tag-on-merge),
+[claude-session-starter](https://github.com/VillegasMich/claude-session-auto-starter)
+and [auto-git-commit-tool](https://github.com/VillegasMich/auto-git-commit-tool).
+It lists each with its status (`running`, `installed` but not active, or
+`not installed`) and a description; type numbers to toggle them (`1 3`), `all`
+or `none`, and Enter to confirm. Nothing is picked by default. Picking one that
+is already running or installed re-runs its installer, which upgrades and
+restarts it.
+
+```sh
+scripts/install.sh --list-companions                  # show them and their status; changes nothing
+scripts/install.sh --companions auto-git-commit-tool  # install without asking (names, comma-separated)
+scripts/install.sh --companions all                   # or none
+```
+
+To add (or upgrade) companions later without touching Cuthulu, use
+`--companions-only`: it skips Cuthulu's own install (no image pull or build,
+no `/etc/cuthulu` writes, no restart of `cuthulu.service`, no sudo for it) and
+runs only this step, with the same prompt, rules and exit code. It can't be
+combined with `--build`, `--reconfigure` or `--companions none`.
+
+```sh
+scripts/install.sh --companions-only                                     # pick from the list
+scripts/install.sh --companions-only --companions producer-tag-on-merge  # without asking
+```
+
+Without a terminal on stdin (e.g. piped, or CI) and without `--companions`,
+the step is skipped with a hint. Run as root (`sudo scripts/install.sh`), it is
+skipped too: run the script as your normal user, since producer-tag-on-merge is
+a systemd *user* service.
+
+Each picked service is cloned to
+`~/.local/share/cuthulu/companions/<name>` (`$XDG_DATA_HOME` if set; a re-run
+does `git pull --ff-only`), then its own `scripts/install.sh` runs as your user
+with `IMAGE=<published image>:latest` exported, so it pulls the published
+image instead of building one. Those installers ask for their own tokens and
+use sudo themselves; settings you export for them (see each project's README)
+reach them too. One failing doesn't stop the others; a summary follows, and
+`install.sh` exits 1 if any failed (Cuthulu stays installed).
+
+The list comes from [`deploy/companions/`](../deploy/companions/README.md), one
+`<name>.conf` per service; adding a service is adding a file there.
+`scripts/uninstall.sh` does not touch companion services: remove them with
+their own uninstall scripts (in their clones).
+
 ## Plain docker run
 
 ```sh
