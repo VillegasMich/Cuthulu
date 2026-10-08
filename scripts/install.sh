@@ -167,7 +167,7 @@ companions_detect() {
 term_cols() {
   local cols=${COLUMNS:-}
   [[ $cols =~ ^[0-9]+$ ]] || cols=$(stty size 2>/dev/null </dev/tty | cut -d ' ' -f 2 || true)
-  [[ $cols =~ ^[0-9]+$ ]] && ((cols > 0)) || cols=80
+  if [[ ! $cols =~ ^[0-9]+$ ]] || ((cols == 0)); then cols=80; fi
   echo "$cols"
 }
 
@@ -450,7 +450,9 @@ main() {
       --build) build=true ;;
       --reconfigure) reconfigure=true ;;
       --companions)
-        (($# >= 2)) && [[ -n $2 ]] || die "--companions needs a list (names, all or none)"
+        if (($# < 2)) || [[ -z $2 ]]; then
+          die "--companions needs a list (names, all or none)"
+        fi
         companions_flag=$2
         shift
         ;;
