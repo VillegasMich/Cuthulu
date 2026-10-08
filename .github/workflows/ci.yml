@@ -84,6 +84,15 @@ jobs:
         with:
           command: check advisories bans licenses sources
 
+  scripts:
+    name: shell scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # shellcheck is preinstalled on the runner.
+      - run: shellcheck scripts/*.sh
+      - run: scripts/test-companions.sh
+
   typos:
     name: typos
     runs-on: ubuntu-latest
