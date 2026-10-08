@@ -215,6 +215,12 @@ One-time setup:
 5. Open `https://cuthulu.<tailnet>.ts.net/` (the first request waits a few
    seconds for the certificate).
 
+Installing Cuthulu as an app (Chrome/Edge *Install app*, Android *Add to
+home screen* or *Install*, iOS Safari *Share* → *Add to Home Screen*) also
+needs a secure origin: this HTTPS address, or `http://localhost`. It then
+opens in its own window with the eye icon. Over plain `http://<machine>/`
+Chrome and Edge offer at most a shortcut that opens in a browser tab.
+
 - The machine name appears in public certificate-transparency logs; that is
   how Tailscale HTTPS certificates work.
 - Tailscale forwards the browser's `Host`, so the

@@ -361,3 +361,30 @@ The brand mark is a minimal eye: a circle with a pupil, drawn in `--accent`,
 used as favicon and logo. The pupil can subtly indicate global health
 (accent when all is well, `--err` when something is down). One idea, used
 sparingly — no tentacles all over the UI.
+
+### App icon
+
+`static/eye.svg` (no background) is the favicon; `static/icons/favicon-32.png`
+is its PNG fallback for browsers without SVG favicons. The installed-app
+icons put the same eye on a full-bleed dark `--bg` square (`#0f1110`):
+`icons/icon.svg` (eye scaled to 80 %) for the `any` icons and the
+`apple-touch-icon`, `icons/maskable.svg` (eye scaled to 68 %, inside the 80 %
+safe-zone circle) for the maskable one. iOS needs an opaque PNG, so the
+square never goes transparent. `<meta name="theme-color">` follows the OS
+scheme with the light and dark `--bg`.
+
+The PNG files are rendered once with headless Chrome and committed. Lossless
+recompression with ImageMagick keeps them small. To regenerate after
+changing an SVG, from the repo root:
+
+```sh
+render() { p=$(mktemp -d); google-chrome --headless=new --user-data-dir="$p" \
+  --hide-scrollbars --force-device-scale-factor=1 --default-background-color=00000000 \
+  --window-size="$2,$2" --screenshot="$3" "file://$PWD/$1"; rm -rf "$p"
+  convert "$3" -strip -define png:compression-level=9 "$3"; }
+render static/eye.svg            32  static/icons/favicon-32.png
+render static/icons/icon.svg     180 static/icons/apple-touch-icon.png
+render static/icons/icon.svg     192 static/icons/icon-192.png
+render static/icons/icon.svg     512 static/icons/icon-512.png
+render static/icons/maskable.svg 512 static/icons/maskable-512.png
+```
