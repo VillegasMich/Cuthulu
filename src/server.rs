@@ -402,6 +402,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn web_app_manifest_and_its_icons_are_served() {
+        let (app, _) = app_with(vec![], false).await;
+        let (_, _, index) = send(&app, get("/")).await;
+        for link in [
+            r#"<link rel="manifest" href="/static/manifest.webmanifest">"#,
+            r#"<link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">"#,
+            r#"<link rel="icon" href="/static/icons/favicon-32.png" type="image/png" sizes="32x32">"#,
+        ] {
+            assert!(index.contains(link), "{link}");
+        }
+
+        let (status, headers, body) = send(&app, get("/static/manifest.webmanifest")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers[header::CONTENT_TYPE], "application/manifest+json");
+        let manifest: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(manifest["display"], "standalone");
+        assert_eq!(manifest["start_url"], "/");
+
+        let mut icons: Vec<(String, String)> = manifest["icons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| {
+                (
+                    i["src"].as_str().unwrap().to_owned(),
+                    i["sizes"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        assert!(
+            manifest["icons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|i| i["purpose"] == "maskable")
+        );
+        icons.extend([
+            (
+                "/static/icons/apple-touch-icon.png".to_owned(),
+                "180x180".to_owned(),
+            ),
+            (
+                "/static/icons/favicon-32.png".to_owned(),
+                "32x32".to_owned(),
+            ),
+        ]);
+        for (src, sizes) in icons {
+            let res = app.clone().oneshot(get(&src)).await.unwrap();
+            assert_eq!(res.status(), StatusCode::OK, "{src}");
+            let mime = res.headers()[header::CONTENT_TYPE]
+                .to_str()
+                .unwrap()
+                .to_owned();
+            let png = res.into_body().collect().await.unwrap().to_bytes();
+            if sizes == "any" {
+                assert_eq!(mime, "image/svg+xml", "{src}");
+                continue;
+            }
+            assert_eq!(mime, "image/png", "{src}");
+            // The IHDR chunk follows the 8-byte signature: width, height as u32 BE.
+            let dim = |at: usize| u32::from_be_bytes(png[at..at + 4].try_into().unwrap());
+            assert_eq!(format!("{}x{}", dim(16), dim(20)), sizes, "{src}");
+        }
+    }
+
+    #[tokio::test]
     async fn event_stream_starts_with_a_snapshot() {
         let (app, _) = app_with(vec![web()], false).await;
         let res = app.oneshot(get("/api/events")).await.unwrap();

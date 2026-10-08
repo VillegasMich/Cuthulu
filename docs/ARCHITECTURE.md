@@ -44,8 +44,15 @@ JSON files in `CUTHULU_DATA_DIR`.
 > dynamic part of the UI is driven by SSE events that patch rows client-side,
 > htmx would have added a dependency without removing any JS. Dropped.
 
-All frontend assets (JS, CSS, the JetBrains Mono font) live under `static/`
-and are embedded in the binary. Nothing is loaded from a CDN.
+All frontend assets (JS, CSS, the JetBrains Mono font, the icons) live under
+`static/` and are embedded in the binary. Nothing is loaded from a CDN.
+
+`static/manifest.webmanifest` makes Cuthulu an installable web app
+(standalone window, `start_url` and `scope` `/`, dark theme colors). Its
+icons are committed PNG files under `static/icons/` (192, 512, a 512
+maskable and the 180 `apple-touch-icon`) plus the SVG; `docs/DESIGN.md` has
+the command that regenerates them. There is no service worker: the app needs the server
+anyway, and browsers install without one.
 
 UI preferences (theme, toggles, pane sizes from the splitters) are kept per
 browser in `localStorage` under `cuthulu.*` keys — never on the server. Every
@@ -100,7 +107,7 @@ src/
     proc.rs            pure parsers for /proc/stat, meminfo, loadavg, uptime, diskstats, net/{dev,route,fib_trie,if_inet6},
                        [pid]/stat|status|cmdline, /etc/passwd
 templates/             base, index, service, not_found
-static/                app.css, app.js, theme.js, eye.svg, fonts/
+static/                app.css, app.js, theme.js, eye.svg, manifest.webmanifest, icons/, fonts/
 ```
 
 ## Core model
@@ -180,7 +187,7 @@ services.
 |--------|------------------------------------|-------------|
 | GET    | `/`                                | Dashboard page |
 | GET    | `/services/{id}`                   | Service detail page |
-| GET    | `/static/{path}`                   | Embedded assets (`ETag`, `Cache-Control: no-cache`) |
+| GET    | `/static/{path}`                   | Embedded assets (`ETag`, `Cache-Control: no-cache`); `manifest.webmanifest` is `application/manifest+json` |
 | GET    | `/healthz`                         | Liveness (`ok`) |
 | GET    | `/api/services`                    | JSON list; `?q=` (name/image/project), `?state=`, `?group=` |
 | GET    | `/api/services/{id}`               | JSON detail |
