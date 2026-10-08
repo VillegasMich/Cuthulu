@@ -288,7 +288,8 @@ main { flex: 1 0 auto; padding: 12px 16px; }
 .meta { overflow: auto; padding-right: 4px; }
 .meta h1 { margin: 0 0 4px; font-size: 15px; }
 .state-line { margin-bottom: 8px; }
-.actions { display: flex; gap: 6px; margin-bottom: 12px; }
+.actions { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.actions .btn { white-space: nowrap; }
 
 .kv { display: grid; grid-template-columns: 9ch 1fr; gap: 0 10px; margin: 0 0 12px; }
 .kv dt { color: var(--key); }
@@ -654,6 +655,31 @@ body.notify-off .bell-btn.on { border-color: var(--border); color: var(--muted);
 .notify-test { margin-bottom: 6px; }
 .notify-dlg p { margin: 8px 0 0; }
 
+/* env file editor: key | value | show | del, one dense row per variable */
+.env-dlg { width: min(96ch, calc(100vw - 32px)); max-height: calc(100vh - 32px); }
+.env-where { grid-template-columns: 9ch minmax(0, 1fr); }
+.env-unlock { display: grid; gap: 4px; text-align: left; }
+.env-unlock[hidden] { display: none; }
+.env-line { display: flex; gap: 6px; }
+.env-line .input { flex: 1; min-width: 0; }
+#env-body p { margin: 0 0 6px; }
+.env-list { max-height: 55vh; overflow-y: auto; }
+.env-row {
+  display: grid;
+  grid-template-columns: minmax(10ch, 30ch) minmax(0, 1fr) 7ch auto;
+  gap: 6px;
+  align-items: center;
+  padding: 2px 0;
+  border-bottom: 1px solid var(--border);
+}
+.env-row:last-child { border-bottom: 0; }
+.env-row .input { min-width: 0; }
+.env-key { color: var(--key); }
+.env-add { margin-top: 4px; text-align: left; }
+#env-status { min-height: 1.45em; margin-top: 6px; }
+#env-status.err { color: var(--err); }
+.env-foot { display: flex; justify-content: flex-end; gap: 6px; margin-top: 6px; }
+
 /* ── topbar "more" menu (phones) ─────────────────────────── */
 
 .more, .counts-short, .st-word { display: none; }
@@ -772,6 +798,10 @@ body.notify-off .bell-btn.on { border-color: var(--border); color: var(--muted);
   .logbar.opts-open .logopts { display: flex; }
 
   .flash { left: 12px; right: 12px; max-width: none; }
+
+  /* env editor: the key above its value */
+  .env-row { grid-template-columns: minmax(0, 1fr) 7ch auto; }
+  .env-row > :first-child { grid-column: 1 / -1; }
 }
 
 /* touch screens: bigger hit areas (same font size), no keyboard hint */

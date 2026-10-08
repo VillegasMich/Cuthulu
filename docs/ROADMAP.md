@@ -69,6 +69,13 @@ Each phase should end in something runnable. Tick items as they land.
 - [x] Bell toggle per service + global switch, persisted in `CUTHULU_DATA_DIR/notify.json`
 - [x] `send test` action (`POST /api/notify/test`)
 
+## Env file editor ✓
+- [x] Companion catalog embedded at build time; container → systemd unit + env file
+- [x] `HostControl` capability; Docker host helper container (`nsenter`, stdin-only secrets, `CUTHULU_HELPER_IMAGE`)
+- [x] `POST /api/services/{id}/env/load|save`: sudo password check as the file's owner or `CUTHULU_HOST_USER`, rate limit, `.bak` + atomic write + unit restart
+- [x] `edit env` dialog: masked values with per-field reveal, add / delete keys, save & restart
+- [x] `install.sh` sets `CUTHULU_HOST_USER` and pre-pulls the helper image
+
 ## Later
 - CPU / memory stats per service (on demand, only for visible rows)
 - systemd provider

@@ -1,5 +1,6 @@
 //! JSON and Server-Sent Events API under `/api`.
 
+mod envedit;
 mod error;
 mod events;
 mod guard;
@@ -31,6 +32,8 @@ pub fn router() -> Router<AppState> {
         .route("/services/{id}/todos/{todo_id}/toggle", post(todos::toggle))
         .route("/services/{id}/todos/{todo_id}/delete", post(todos::delete))
         .route("/services/{id}/notify", post(notify::set_watch))
+        .route("/services/{id}/env/load", post(envedit::load))
+        .route("/services/{id}/env/save", post(envedit::save))
         .route("/notify", get(notify::state).post(notify::set_enabled))
         .route("/notify/test", post(notify::test))
         .route("/healthcheck", get(healthcheck::status))

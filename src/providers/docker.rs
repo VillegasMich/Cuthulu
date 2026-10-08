@@ -2,24 +2,32 @@
 //! This is the only module allowed to use `bollard`.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::hash::{BuildHasher, RandomState};
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
+use bollard::container::AttachContainerResults;
 use bollard::container::LogOutput;
 use bollard::errors::Error as DockerError;
 use bollard::models::{
-    ContainerInspectResponse, ContainerStateStatusEnum, EventMessage, EventMessageTypeEnum,
-    HealthStatusEnum,
+    ContainerCreateBody, ContainerInspectResponse, ContainerStateStatusEnum, EventMessage,
+    EventMessageTypeEnum, HealthStatusEnum, HostConfig,
 };
 use bollard::query_parameters::{
+    AttachContainerOptionsBuilder, CreateContainerOptionsBuilder, CreateImageOptionsBuilder,
     EventsOptionsBuilder, ListContainersOptionsBuilder, LogsOptionsBuilder,
+    RemoveContainerOptionsBuilder,
 };
 use bollard::{API_DEFAULT_VERSION, Docker};
 use futures_util::stream::{self, BoxStream, StreamExt, TryStreamExt};
+use tokio::io::AsyncWriteExt;
 
 use super::lines::LineSplitter;
-use super::{Provider, ProviderError, ProviderEvent, Result};
+use super::{
+    HostControl, HostError, HostOutput, HostScript, Provider, ProviderError, ProviderEvent, Result,
+};
 use crate::model::{
     Action, Health, LogLine, LogOptions, LogStream, MountInfo, PortMapping, ProviderKind, Service,
     ServiceDetail, ServiceId, ServiceState,
@@ -32,6 +40,21 @@ const INSPECT_CONCURRENCY: usize = 16;
 /// Label that marks Cuthulu's own container.
 pub const SELF_LABEL: &str = "cuthulu.self";
 const COMPOSE_PROJECT_LABEL: &str = "com.docker.compose.project";
+/// Label of the short-lived host helper containers; they are never listed.
+pub const HELPER_LABEL: &str = "cuthulu.helper";
+/// Most stdout kept from a host command (an env file is far smaller).
+const HELPER_STDOUT_MAX: usize = 256 * 1024;
+/// Tail of stderr kept from a host command, for error messages.
+const HELPER_STDERR_MAX: usize = 4 * 1024;
+/// Upper bound for pulling the helper image on first use.
+const HELPER_PULL_TIMEOUT: Duration = Duration::from_secs(120);
+/// Prefix of the line the helper's wrapper prints last on stderr with the
+/// host script's exit status. Read from the stream instead of a container
+/// wait, which races with `auto_remove`.
+const EXIT_MARKER: &str = "cuthulu-helper-exit=";
+/// Runs the host script (`$1`) in the host's namespaces, then reports its status.
+const HELPER_WRAPPER: &str =
+    "nsenter -t 1 -m -u -i -n -p -- /bin/sh -c \"$1\"; echo \"cuthulu-helper-exit=$?\" >&2";
 
 /// Container event actions that can change what we display.
 const RELEVANT_ACTIONS: &[&str] = &[
@@ -43,6 +66,8 @@ pub struct DockerProvider {
     docker: Docker,
     /// Short container id of the container we run in, if any.
     self_hint: Option<String>,
+    /// Image of the host helper container (needs `nsenter`).
+    helper_image: String,
 }
 
 impl DockerProvider {
@@ -67,7 +92,152 @@ impl DockerProvider {
             .flatten()
             .filter(|h| h.len() >= 12 && h.bytes().all(|b| b.is_ascii_hexdigit()));
 
-        Ok(Self { docker, self_hint })
+        Ok(Self {
+            docker,
+            self_hint,
+            helper_image: crate::config::DEFAULT_HELPER_IMAGE.to_owned(),
+        })
+    }
+
+    /// Uses `image` for the host helper container instead of the default.
+    #[must_use]
+    pub fn with_helper_image(mut self, image: String) -> Self {
+        self.helper_image = image;
+        self
+    }
+
+    /// Pulls the helper image unless it is already present.
+    async fn ensure_helper_image(&self) -> std::result::Result<(), HostError> {
+        let image = self.helper_image.as_str();
+        match self.docker.inspect_image(image).await {
+            Ok(_) => return Ok(()),
+            Err(DockerError::DockerResponseServerError {
+                status_code: 404, ..
+            }) => {}
+            Err(e) => return Err(host_error(e)),
+        }
+        tracing::info!(image, "pulling the host helper image");
+        let pull = self
+            .docker
+            .create_image(
+                Some(CreateImageOptionsBuilder::new().from_image(image).build()),
+                None,
+                None,
+            )
+            .try_for_each(|_| async { Ok(()) });
+        let failed = |reason: String| HostError::Image {
+            image: image.to_owned(),
+            reason,
+        };
+        match tokio::time::timeout(HELPER_PULL_TIMEOUT, pull).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(failed(e.to_string())),
+            Err(_) => Err(failed(format!(
+                "no answer within {}s",
+                HELPER_PULL_TIMEOUT.as_secs()
+            ))),
+        }
+    }
+
+    /// Creates, attaches to and starts the helper `name`, feeds `stdin`, and
+    /// collects its output until it exits.
+    async fn run_helper(
+        &self,
+        name: &str,
+        script: &HostScript,
+        stdin: &[u8],
+    ) -> std::result::Result<HostOutput, HostError> {
+        let config = ContainerCreateBody {
+            image: Some(self.helper_image.clone()),
+            cmd: Some(vec![
+                "sh".to_owned(),
+                "-c".to_owned(),
+                HELPER_WRAPPER.to_owned(),
+                "cuthulu-helper".to_owned(),
+                script.text.clone(),
+            ]),
+            attach_stdin: Some(true),
+            attach_stdout: Some(true),
+            attach_stderr: Some(true),
+            open_stdin: Some(true),
+            stdin_once: Some(true),
+            tty: Some(false),
+            labels: Some(HashMap::from([
+                (HELPER_LABEL.to_owned(), "true".to_owned()),
+                ("cuthulu.helper.op".to_owned(), script.op.to_owned()),
+            ])),
+            host_config: Some(HostConfig {
+                privileged: Some(true),
+                pid_mode: Some("host".to_owned()),
+                // nsenter joins the host's network namespace anyway.
+                network_mode: Some("none".to_owned()),
+                auto_remove: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        self.docker
+            .create_container(
+                Some(CreateContainerOptionsBuilder::new().name(name).build()),
+                config,
+            )
+            .await
+            .map_err(host_error)?;
+        let AttachContainerResults {
+            mut output,
+            mut input,
+        } = self
+            .docker
+            .attach_container(
+                name,
+                Some(
+                    AttachContainerOptionsBuilder::new()
+                        .stdin(true)
+                        .stdout(true)
+                        .stderr(true)
+                        .stream(true)
+                        .build(),
+                ),
+            )
+            .await
+            .map_err(host_error)?;
+        self.docker
+            .start_container(name, None)
+            .await
+            .map_err(host_error)?;
+
+        let io = |e: std::io::Error| HostError::Helper(format!("stdin: {e}"));
+        input.write_all(stdin).await.map_err(io)?;
+        // Half-closes the connection: with `stdin_once` the script sees EOF.
+        input.shutdown().await.map_err(io)?;
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        while let Some(chunk) = output.next().await {
+            match chunk.map_err(host_error)? {
+                LogOutput::StdOut { message } | LogOutput::Console { message } => {
+                    if stdout.len() + message.len() > HELPER_STDOUT_MAX {
+                        return Err(HostError::TooMuchOutput(HELPER_STDOUT_MAX));
+                    }
+                    stdout.extend_from_slice(&message);
+                }
+                LogOutput::StdErr { message } => {
+                    stderr.extend_from_slice(&message);
+                    // Keep the tail (and some slack so the marker line stays whole).
+                    if stderr.len() > 2 * HELPER_STDERR_MAX {
+                        stderr.drain(..stderr.len() - HELPER_STDERR_MAX);
+                    }
+                }
+                LogOutput::StdIn { .. } => {}
+            }
+        }
+        let (status, stderr) = split_exit_marker(&String::from_utf8_lossy(&stderr))
+            .ok_or_else(|| HostError::Helper("it ended without an exit status".to_owned()))?;
+        Ok(HostOutput {
+            status,
+            stdout,
+            stderr,
+        })
     }
 
     async fn inspect(
@@ -199,6 +369,66 @@ impl Provider for DockerProvider {
     }
 }
 
+#[async_trait]
+impl HostControl for DockerProvider {
+    async fn run(
+        &self,
+        script: &HostScript,
+        stdin: &[u8],
+        timeout: Duration,
+    ) -> std::result::Result<HostOutput, HostError> {
+        self.ensure_helper_image().await?;
+        let name = helper_name();
+        tracing::debug!(helper = %name, op = script.op, "running host command");
+        let res = tokio::time::timeout(timeout, self.run_helper(&name, script, stdin)).await;
+        if !matches!(res, Ok(Ok(_))) {
+            // auto_remove covers a normal exit; this covers timeouts and
+            // failures before or after the start. A 404 means it is gone.
+            let force = RemoveContainerOptionsBuilder::new().force(true).build();
+            if let Err(e) = self.docker.remove_container(&name, Some(force)).await
+                && !matches!(
+                    e,
+                    DockerError::DockerResponseServerError {
+                        status_code: 404 | 409,
+                        ..
+                    }
+                )
+            {
+                tracing::warn!(helper = %name, error = %e, "cannot remove the helper container");
+            }
+        }
+        res.map_err(|_| HostError::Timeout(timeout))?
+    }
+}
+
+/// `cuthulu-helper-<16 hex digits>`, unique per call.
+fn helper_name() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    // RandomState is seeded from the OS once per process; the counter makes
+    // every name in this process differ.
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("cuthulu-helper-{:016x}", RandomState::new().hash_one(n))
+}
+
+/// Splits the helper wrapper's exit status off the end of stderr (the host
+/// script's stderr may not end with a newline, so the marker can share its line).
+fn split_exit_marker(stderr: &str) -> Option<(i32, String)> {
+    let at = stderr.rfind(EXIT_MARKER)?;
+    let status = stderr[at + EXIT_MARKER.len()..].trim().parse().ok()?;
+    Some((status, stderr[..at].trim_end().to_owned()))
+}
+
+fn host_error(e: DockerError) -> HostError {
+    match e {
+        e @ (DockerError::SocketNotFoundError(_)
+        | DockerError::IOError { .. }
+        | DockerError::HyperResponseError { .. }
+        | DockerError::HyperLegacyError { .. }
+        | DockerError::RequestTimeoutError) => HostError::Unavailable(Box::new(e)),
+        e => HostError::Helper(e.to_string()),
+    }
+}
+
 struct LogState {
     inner: BoxStream<'static, std::result::Result<LogOutput, DockerError>>,
     splitter: LineSplitter,
@@ -266,7 +496,15 @@ fn event_from_message(msg: &EventMessage) -> Option<ProviderEvent> {
         return None;
     }
     let action = msg.action.as_deref()?;
-    let native = msg.actor.as_ref()?.id.as_deref()?;
+    let actor = msg.actor.as_ref()?;
+    if actor
+        .attributes
+        .as_ref()
+        .is_some_and(|a| a.contains_key(HELPER_LABEL))
+    {
+        return None;
+    }
+    let native = actor.id.as_deref()?;
     let id = ServiceId::new(ProviderKind::Docker, native);
 
     if action == "destroy" {
@@ -287,6 +525,9 @@ fn service_from_inspect(
     let config = resp.config.as_ref();
     let labels = config.and_then(|c| c.labels.as_ref());
     let label = |key: &str| labels.and_then(|l| l.get(key));
+    if label(HELPER_LABEL).is_some() {
+        return None;
+    }
 
     let service_state = match state.and_then(|s| s.status) {
         Some(ContainerStateStatusEnum::RUNNING | ContainerStateStatusEnum::STOPPING) => {
@@ -596,5 +837,190 @@ mod tests {
             Some(ProviderEvent::Removed(id))
         );
         assert_eq!(event_from_message(&msg("exec_start: sh")), None);
+    }
+
+    #[test]
+    fn exit_marker_is_split_off_stderr() {
+        assert_eq!(
+            split_exit_marker("Sorry, try again.\ncuthulu-helper-exit=12\n"),
+            Some((12, "Sorry, try again.".to_owned()))
+        );
+        assert_eq!(
+            split_exit_marker("no newlinecuthulu-helper-exit=0\n"),
+            Some((0, "no newline".to_owned()))
+        );
+        assert_eq!(
+            split_exit_marker("cuthulu-helper-exit=127"),
+            Some((127, String::new()))
+        );
+        assert_eq!(split_exit_marker("killed"), None);
+        assert_eq!(split_exit_marker("cuthulu-helper-exit=x"), None);
+    }
+
+    #[test]
+    fn helper_names_are_unique() {
+        let (a, b) = (helper_name(), helper_name());
+        assert_ne!(a, b);
+        assert!(a.starts_with("cuthulu-helper-") && a.len() == 31, "{a}");
+    }
+
+    #[test]
+    fn helpers_are_hidden() {
+        let mut resp = inspect(ContainerStateStatusEnum::RUNNING);
+        resp.config
+            .as_mut()
+            .unwrap()
+            .labels
+            .as_mut()
+            .unwrap()
+            .insert(HELPER_LABEL.into(), "true".into());
+        assert_eq!(service_from_inspect(&resp, None), None);
+        let msg = EventMessage {
+            typ: Some(EventMessageTypeEnum::CONTAINER),
+            action: Some("start".into()),
+            actor: Some(EventActor {
+                id: Some("abc".into()),
+                attributes: Some(HashMap::from([(HELPER_LABEL.into(), "true".into())])),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(event_from_message(&msg), None);
+    }
+
+    /// The helper container against the real host, on throwaway targets only:
+    /// a temp file under /tmp and the user unit `cuthulu-env-edit-test`
+    /// (create it first, see docs/ARCHITECTURE.md#env-file-editor). Checks
+    /// a wrong sudo password fails, never a real one.
+    #[tokio::test]
+    #[ignore = "needs Docker, systemd and the throwaway user unit cuthulu-env-edit-test"]
+    #[allow(clippy::too_many_lines)] // one scenario against the real host, step by step
+    async fn helper_end_to_end() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        use crate::catalog::{Entry, UnitScope};
+        use crate::envedit::host::{self, HostUser, Target};
+
+        let docker = DockerProvider::connect("unix:///var/run/docker.sock").unwrap();
+        let timeout = Duration::from_secs(30);
+        let me = HostUser::parse(&std::env::var("USER").unwrap()).unwrap();
+        let dir = std::path::PathBuf::from(format!("/tmp/cuthulu-env-edit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("env");
+        std::fs::write(&file, "# throwaway\nA=1\nTOKEN=old\n").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let target = Target::new(&Entry {
+            name: "cuthulu-env-edit-test".into(),
+            container: "cuthulu-env-edit-test".into(),
+            unit: "cuthulu-env-edit-test".into(),
+            scope: UnitScope::User,
+            env_file: file.to_str().unwrap().into(),
+        })
+        .unwrap();
+        let main_pid = || {
+            let out = std::process::Command::new("systemctl")
+                .args([
+                    "--user",
+                    "show",
+                    "-p",
+                    "MainPID",
+                    "--value",
+                    "cuthulu-env-edit-test",
+                ])
+                .output()
+                .unwrap();
+            String::from_utf8(out.stdout).unwrap().trim().to_owned()
+        };
+
+        // Probe: owner and size, no secret.
+        let out = docker
+            .run(&host::probe(&target, None).unwrap(), b"", timeout)
+            .await
+            .unwrap();
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        let probe = host::parse_probe(&String::from_utf8_lossy(&out.stdout)).unwrap();
+        let meta = std::fs::metadata(&file).unwrap();
+        assert_eq!((probe.uid, probe.size), (meta.uid(), meta.len()));
+        assert_eq!(host::resolve_user(&probe, None), Ok(me.clone()));
+
+        // A wrong password is refused by sudo.
+        let out = docker
+            .run(
+                &host::read(&target, None, &me).unwrap(),
+                b"not-the-password-cuthulu-test\n",
+                timeout,
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.status, host::EXIT_SUDO, "{}", out.stderr);
+        assert!(out.stderr.contains("incorrect password"), "{}", out.stderr);
+
+        // Write: .bak, atomic replace with mode and owner kept, user unit restarted.
+        let before = main_pid();
+        let out = docker
+            .run(
+                &host::write(&target, None, &me, false).unwrap(),
+                b"# throwaway\nA=2\n",
+                timeout,
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "# throwaway\nA=2\n"
+        );
+        let after = std::fs::metadata(&file).unwrap();
+        assert_eq!(
+            (after.mode() & 0o7777, after.uid(), after.gid()),
+            (0o640, meta.uid(), meta.gid())
+        );
+        assert_ne!(
+            after.ino(),
+            meta.ino(),
+            "renamed over, not rewritten in place"
+        );
+        let bak = dir.join("env.bak");
+        assert_eq!(
+            std::fs::read_to_string(&bak).unwrap(),
+            "# throwaway\nA=1\nTOKEN=old\n"
+        );
+        assert_eq!(std::fs::metadata(&bak).unwrap().mode() & 0o7777, 0o640);
+        assert_ne!(main_pid(), before, "the unit was restarted");
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            2,
+            "no temp files left"
+        );
+
+        // Missing file, timeout.
+        std::fs::remove_file(&file).unwrap();
+        let out = docker
+            .run(&host::probe(&target, None).unwrap(), b"", timeout)
+            .await
+            .unwrap();
+        assert_eq!(out.status, host::EXIT_NO_FILE);
+        let slow = HostScript {
+            op: "sleep",
+            text: "sleep 20".into(),
+        };
+        let err = docker
+            .run(&slow, b"", Duration::from_secs(2))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, HostError::Timeout(_)), "{err}");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+        let filters = HashMap::from([("label", vec![HELPER_LABEL])]);
+        let left = docker
+            .docker
+            .list_containers(Some(
+                ListContainersOptionsBuilder::new()
+                    .all(true)
+                    .filters(&filters)
+                    .build(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(left.len(), 0, "helpers left behind: {left:?}");
     }
 }

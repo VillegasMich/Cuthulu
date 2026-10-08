@@ -39,6 +39,9 @@ readonly INSTALL_DIR=/etc/cuthulu
 readonly ENV_FILE=$INSTALL_DIR/.env
 readonly UNIT_FILE=/etc/systemd/system/$SERVICE.service
 readonly SOCKET=/var/run/docker.sock
+# Host helper container of the env editor (busybox has nsenter), pinned by digest. Keep in sync
+# with DEFAULT_HELPER_IMAGE in src/config.rs (a test checks).
+readonly HELPER_IMAGE=busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
 # Every catalog entry needs these; SUGGEST (true|false, default true) is optional.
 readonly COMPANION_KEYS=(NAME DESCRIPTION REPO IMAGE CONTAINER UNIT UNIT_SCOPE ENV_FILE)
 # Width of the status column: the longest status, "not installed".
@@ -416,6 +419,24 @@ install_cuthulu() {
   fi
   set_env IMAGE "$image"
   set_env DOCKER_GID "$docker_gid"
+
+  # --- Env editor ----------------------------------------------------------------------------
+  # The dashboard's "edit env" asks for this user's sudo password (never root's: sudo asks root
+  # for none). An existing value is kept.
+  if ! "${SUDO[@]}" grep -q '^CUTHULU_HOST_USER=.' "$ENV_FILE"; then
+    host_user=${SUDO_USER:-$(id -un)}
+    if [[ $host_user == root ]]; then
+      warn "run as root: set CUTHULU_HOST_USER=<your user> in $ENV_FILE to edit env files"
+    else
+      set_env CUTHULU_HOST_USER "$host_user"
+    fi
+  fi
+  # Pulled now so editing works offline later; an override in the env file wins.
+  helper_image=$("${SUDO[@]}" sed -n 's/^CUTHULU_HELPER_IMAGE=//p' "$ENV_FILE" | tail -n 1)
+  helper_image=${helper_image:-$HELPER_IMAGE}
+  log "Pulling the env editor's helper image $helper_image"
+  "${DOCKER[@]}" pull --quiet "$helper_image" >/dev/null \
+    || warn "cannot pull $helper_image; the env editor pulls it on first use"
 
   # --- Compose file and systemd unit ---------------------------------------------------------
   log "Installing $INSTALL_DIR/compose.yaml"

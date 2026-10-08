@@ -7,12 +7,17 @@ use std::time::Duration;
 
 use lettre::message::Mailbox;
 
+use crate::envedit::host::HostUser;
 use crate::hosts::AllowedHosts;
 
 /// Hard upper bound for log history requested per stream.
 pub const MAX_LOG_TAIL: usize = 10_000;
 /// Bounds for the host panel's sampling interval, in seconds.
 pub const SYSTEM_SECS: std::ops::RangeInclusive<u64> = 1..=60;
+/// Image of the host helper container used by the env editor: busybox has
+/// `nsenter`. Pinned by digest (the multi-arch `busybox:stable` index).
+pub const DEFAULT_HELPER_IMAGE: &str =
+    "busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -43,6 +48,10 @@ pub struct Config {
     pub tailscale_socket: Option<PathBuf>,
     /// Explicit Tailscale admin console URL for the topbar button.
     pub tailscale_url: Option<String>,
+    /// Image of the short-lived host helper container (env editor).
+    pub helper_image: String,
+    /// Host user whose sudo password unlocks root-owned env files.
+    pub host_user: Option<HostUser>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -69,6 +78,8 @@ impl Default for Config {
             notify: NotifyConfig::default(),
             tailscale_socket: Some(PathBuf::from("/var/run/tailscale/tailscaled.sock")),
             tailscale_url: None,
+            helper_image: DEFAULT_HELPER_IMAGE.to_owned(),
+            host_user: None,
         }
     }
 }
@@ -170,6 +181,14 @@ impl Config {
                         .map(Some)
                         .ok_or_else(|| "must be an http(s) URL".to_owned())
                 },
+            )?,
+            helper_image: get("CUTHULU_HELPER_IMAGE")
+                .map_or(d.helper_image, |v| v.trim().to_owned()),
+            host_user: parse(
+                get("CUTHULU_HOST_USER"),
+                "CUTHULU_HOST_USER",
+                d.host_user,
+                |v| HostUser::parse(v).map(Some).map_err(str::to_owned),
             )?,
         })
     }
@@ -596,6 +615,35 @@ mod tests {
     #[test]
     fn empty_values_mean_default() {
         assert_eq!(from(&[("CUTHULU_BIND", "  ")]).unwrap(), Config::default());
+    }
+
+    #[test]
+    fn env_editor_settings() {
+        let c = from(&[
+            ("CUTHULU_HOST_USER", "manuel"),
+            ("CUTHULU_HELPER_IMAGE", "registry.local/busybox:1"),
+        ])
+        .unwrap();
+        assert_eq!(c.host_user.as_ref().map(HostUser::as_str), Some("manuel"));
+        assert_eq!(c.helper_image, "registry.local/busybox:1");
+        assert_eq!(Config::default().host_user, None);
+        assert!(
+            Config::default()
+                .helper_image
+                .starts_with("busybox@sha256:")
+        );
+        for bad in ["root", "Bad User", "-x"] {
+            assert!(from(&[("CUTHULU_HOST_USER", bad)]).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn install_sh_pre_pulls_the_same_helper_image() {
+        let script = include_str!("../scripts/install.sh");
+        assert!(
+            script.contains(&format!("readonly HELPER_IMAGE={DEFAULT_HELPER_IMAGE}\n")),
+            "update HELPER_IMAGE in scripts/install.sh"
+        );
     }
 
     #[test]

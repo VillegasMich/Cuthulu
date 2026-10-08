@@ -23,6 +23,8 @@ COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY templates ./templates
 COPY static ./static
+# The companion catalog, embedded for the env editor.
+COPY deploy/companions ./deploy/companions
 
 # Full git commit, shown next to the version in the UI and in /api/version
 # (CI passes github.sha). Declared late so changing it only redoes this step.

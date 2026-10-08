@@ -136,6 +136,7 @@ mod tests {
             todos: Arc::new(TodoStore::open(dir.path())),
             notifier: Notifier::new(&config),
             tailscale: Arc::new(crate::tailscale::tests::disabled()),
+            env_edit: Arc::new(crate::envedit::EnvEditor::new(None, None, false)),
             config: Arc::new(config),
             shutdown,
         });
