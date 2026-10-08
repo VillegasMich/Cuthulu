@@ -169,6 +169,19 @@ stores an explicit choice in `localStorage` and sets `data-theme` on `<html>`.
   never addresses or URLs), `browser` (permission state, `allow` button) —
   then `send test` with a per-channel result line (`sent` `--ok`,
   `failed: …` `--err`). Read-only shows the same, without controls.
+- Env editor (catalog services only): an `edit env` text button after
+  the bell in the detail actions (`disabled`, tooltip naming
+  `CUTHULU_HOST_USER`, when no host user is set; absent in read-only mode).
+  It opens a dialog in the help/notifications box: a `kv` list (`file`,
+  `restarts` with the unit and its scope in `--muted`), then a password
+  input + `unlock`. Unlocked, a `--muted` line (`N variables · unlocked as
+  <user> · values are written exactly as typed (no quoting)`) and one dense
+  row per variable: key in `--key`, value input, `show`/`hide` (`.on` while
+  shown, `aria-pressed`) for masked keys, `del`; a last row adds a key.
+  The list scrolls past 55vh. `save & restart` (`.danger`, after a
+  `confirm`) and `cancel` at the bottom right; errors in `--err` above
+  them. On phones the key sits above its value. Closing forgets the
+  password. No new color tokens.
 - Browser alert: a desktop notification `<name> is down` / `<state> ·
   cuthulu` (`<state> · stopped from the dashboard` after a stop clicked
   there); without permission the same text in the error flash.

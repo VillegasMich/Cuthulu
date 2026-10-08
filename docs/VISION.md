@@ -36,7 +36,9 @@ up, what is down, and what each service is saying.
 ## Non-goals (for now)
 
 - Not a replacement for Portainer: no image management, volume management,
-  network editing, or container creation.
+  network editing, or container creation. Settings can be edited only for
+  the services in the companion catalog, through their systemd unit's env
+  file.
 - Not a metrics/alerting stack (Prometheus/Grafana). A live, htop-style host
   CPU/memory panel exists and per-service CPU/memory may come later;
   long-term time series will not.
@@ -64,6 +66,7 @@ their own Linux workstation or home server.
 | 10| monitor non-Docker services (systemd units, plain processes)   | Later |
 | 11| get a desktop notification / email when a watched service dies | Done  |
 | 12| see host CPU / memory / network at a glance                    | Done  |
+| 13| change a catalog service's env file (behind my sudo password) and restart it | Done |
 
 ## Success criteria for the MVP
 

@@ -69,6 +69,11 @@ src/
   lib.rs
   config.rs            CUTHULU_* env parsing (pure, unit-tested via a lookup fn)
   envfile.rs           optional ./.env reader layered under the real environment
+  catalog.rs           companion catalog (deploy/companions/*.conf), embedded; container → unit + env file
+  envedit/
+    mod.rs             EnvEditor: password-gated load / save & restart, wrong-password rate limit
+    file.rs            env file as lines: raw values, round-trip edits, masking rule
+    host.rs            host command templates (probe / read / write), name checks, sudo user resolution
   build_info.rs        version + repo URL (Cargo.toml) + git commit injected at build time
   model.rs             Service, ServiceId, ServiceState, Action, LogLine, …
   registry.rs          in-memory state, watch loop per provider, broadcast; MockProvider for tests
@@ -92,13 +97,14 @@ src/
     guard.rs           CSRF / same-origin check for POSTs
     todos.rs           per-service TODO list / create / toggle / delete
     notify.rs          notification settings, watch toggle, test
+    envedit.rs         env file editor: load / save (password-gated)
     healthcheck.rs     heartbeat status + dashboard link for the topbar
     tailscale.rs       link to this machine in the Tailscale admin console
     version.rs         running build (version, commit)
     error.rs           ApiError → JSON { error, code }
   providers/
-    mod.rs             Provider trait, ProviderError, ProviderEvent
-    docker.rs          bollard-backed implementation (the only bollard user)
+    mod.rs             Provider trait, ProviderError, ProviderEvent; HostControl (host commands)
+    docker.rs          bollard-backed implementation (the only bollard user), host helper container
     lines.rs           log chunk → line splitting, timestamp parsing
     ansi.rs            ANSI SGR → style spans, other escapes stripped
     level.rs           level keyword detection (INFO, level=warn, …) for uncolored lines
@@ -203,12 +209,15 @@ services.
 | GET    | `/api/notify`                      | `{enabled, watched, email, healthcheck, cooldown_minutes, restarted_elsewhere}`; never addresses or URLs |
 | POST   | `/api/notify`                      | Global alert switch, body `{"enabled": bool}`; returns the state |
 | POST   | `/api/services/{id}/notify`        | Watch / unwatch, body `{"watch": bool}`; returns the state |
+| POST   | `/api/services/{id}/env/load`      | Env file editor: body `{"password"}`; `{file, unit, scope, user, version, vars: [{key, value, secret}]}`. Catalog services only |
+| POST   | `/api/services/{id}/env/save`      | Body `{"password", "version", "vars": [{key, value}]}` (the complete new list); writes the file and restarts the unit; `{unit, restarting_self}` |
 | POST   | `/api/notify/test`                 | Send a test email and one ping now; `{email, healthcheck}` each `{status: sent\|off\|failed, error?}` |
 | GET    | `/api/healthcheck`                 | `{available, url, state: ok\|failed\|skipped\|pending\|off, last_ping_at, error}` for the topbar's healthchecks.io link; `url` is the dashboard, never the ping URL; always 200 |
 | GET    | `/api/tailscale`                   | `{available, url, tailnet, host, ip}` for the topbar's Tailscale admin link; always 200 |
 | GET    | `/api/version`                     | `{"version": "0.1.0", "git_sha": "<full sha>" \| null}` |
 
-Errors: JSON `{ "error": "...", "code": "bad_request|forbidden|not_found|unavailable|internal" }`.
+Errors: JSON `{ "error": "...", "code": "bad_request|unauthorized|forbidden|not_found|conflict|too_many_requests|unavailable|internal" }`
+(`too_many_requests` comes with `Retry-After`).
 
 ### SSE events
 
@@ -492,6 +501,86 @@ panel it is **not** a `Provider`: Tailscale is not a service source.
 > (`fetch('/api/tailscale')` after load) rather than rendered into the page
 > shell, so a slow or missing tailscaled never delays a page.
 
+## Env file editor
+
+Services from the companion catalog (`deploy/companions/*.conf`, embedded
+into the binary at build time and parsed with `install.sh`'s rules) get an
+**edit env** button on their detail page: the container name must equal the
+entry's `CONTAINER`. The entry names the systemd unit (`UNIT`, `UNIT_SCOPE`)
+and the env file (`ENV_FILE`). Adding a catalog entry makes another service
+editable; nothing else is. Like the host panel, this is not a `Provider`
+feature: it acts on the host, through the provider-agnostic `HostControl`
+trait (`run(script, stdin, timeout) -> {status, stdout, stderr}`).
+
+**Flow.** The dialog asks for the sudo password and keeps it only in the
+page's memory until it closes. `POST …/env/load` and `POST …/env/save` each
+send it; the server checks it on every request and never stores or logs it.
+
+1. *probe* (no secret): the file's owner uid/name and size.
+2. *read*: `runuser -u <user> -- sudo -S -k -v -p ''` with the password on
+   stdin, then `sudo -k`, then `cat` the file (≤ 64 KiB, UTF-8). `<user>` is
+   the file's owner when that is a normal user, else `CUTHULU_HOST_USER`;
+   never root, whom sudo would not ask. Exit 12 = sudo refused → `401` (or
+   `403` when the user may not use sudo).
+3. *write* (save only, stdin = the new file): `cp -p` to a temp file renamed
+   to `<file>.bak` (one, overwritten each time), the new content to a
+   `mktemp` file in the same directory, `chown`/`chmod --reference`, `mv`
+   over the file, then `systemctl restart <unit>`, or for user units
+   `runuser -u <user> -- env XDG_RUNTIME_DIR=/run/user/<uid> systemctl --user
+   restart <unit>`. Cuthulu's own unit restarts with `--no-block`, so the
+   reply goes out before the restart stops it; the page shows "reconnecting"
+   and the event stream reconnects as usual.
+
+**Values.** A value is the raw text after the first `=`, exactly as in the
+file: the files are read by `docker run --env-file` (verbatim, quotes are part
+of the value), Compose (strips quotes, drops ` # comments`) and systemd, so
+the editor never adds or removes quotes or escapes. Unchanged lines,
+comments, blank lines and the order of keys round-trip byte for byte; a
+changed value is rewritten in place (keeping an `export ` prefix), deleted
+keys drop their line, new keys are appended. Keys must match
+`[A-Za-z_][A-Za-z0-9_]*`; values must not contain a line break or NUL. A file
+that sets a key twice is refused (`409`). The save carries the `version`
+(hash) from the load and fails with `409` if the file changed in between.
+Keys matching `TOKEN|PASSWORD|PASS|SECRET|KEY|URL|AUTH` (any case) are
+masked in the dialog, each with its own show/hide toggle.
+
+**Helper container.** `DockerProvider` runs each step in a short-lived
+`cuthulu-helper-<random>` container from `CUTHULU_HELPER_IMAGE` (default:
+`busybox`, pinned by digest; pulled on first use if missing,
+`scripts/install.sh` pre-pulls it): `privileged`, `pid: host`,
+`network_mode: none`, `auto_remove`, label `cuthulu.helper=true` (never
+listed, its events ignored). Its command is
+`nsenter -t 1 -m -u -i -n -p -- /bin/sh -c <script>`, followed by a line
+with the exit status on stderr (read from the attach stream, which avoids the
+race between a container wait and `auto_remove`). The client attaches before
+start, writes stdin and half-closes it (`stdin_once`), and keeps at most
+256 KiB of stdout and the last 4 KiB of stderr. 30 s per probe/read, 90 s
+for a write + restart; on a timeout or error the container is force-removed.
+
+**Rate limit.** Five wrong passwords within five minutes (global, in memory)
+make every password-gated request return `429` with `Retry-After` until the
+oldest failure leaves the window.
+
+**Errors** (shown in the dialog): wrong password `401`; limited `429`; read-only
+`403`; not a catalog service `404`; `CUTHULU_HOST_USER` unset, missing file,
+file too large, key set twice, stale version `409`; Docker or helper image
+problems, timeouts `503`; write or restart failures `500` ("saved, but
+restarting … failed: <systemctl's message>"). Messages hold paths, units and
+host stderr (which never echoes stdin), never a value or the password.
+
+Test against the real host only with throwaway targets:
+`cargo test helper_end_to_end -- --ignored` writes a temp file under
+`/tmp/cuthulu-env-edit-*` and restarts the user unit
+`cuthulu-env-edit-test.service` (create it first:
+`ExecStart=/usr/bin/sleep infinity` in `~/.config/systemd/user/`); its sudo
+check only ever sends a wrong password.
+
+> **Decision (2026-10):** the button is disabled (tooltip names
+> `CUTHULU_HOST_USER`) whenever `CUTHULU_HOST_USER` is unset: whether a file
+> is root-owned is only known after a privileged helper run, too heavy for
+> every page view, and every current catalog file needs it anyway (three are
+> root-owned, one is under `~`, which only that user expands).
+
 ## Self-awareness
 
 Cuthulu marks its own container `is_self` when the container carries the
@@ -539,6 +628,8 @@ context, so containers get their settings from Compose as before.
 | `CUTHULU_HEALTHCHECK_LINK` | `https://healthchecks.io/`   | http(s) URL the topbar's healthchecks.io button opens (a project or check page, a self-hosted instance); not secret. Without `CUTHULU_HEALTHCHECK_URL` it has no effect and is warned about hourly |
 | `CUTHULU_TAILSCALE_SOCKET` | `/var/run/tailscale/tailscaled.sock` | tailscaled LocalAPI socket for the topbar's admin console link; set empty to disable |
 | `CUTHULU_TAILSCALE_URL`  | unset                          | Explicit http(s) URL for the Tailscale button; shown even without the socket |
+| `CUTHULU_HOST_USER`      | unset (`install.sh` sets it)   | Host login whose sudo password unlocks the env editor for root-owned files, and whose home `~` in a catalog `ENV_FILE` means. Never `root`. Unset = the editor's button is disabled |
+| `CUTHULU_HELPER_IMAGE`   | `busybox@sha256:73aaf0…` (`busybox:stable`) | Image of the env editor's host helper container; needs `nsenter` and `sh` |
 | `RUST_LOG`               | `info`                         | Tracing filter |
 
 Planned: `CUTHULU_AUTH_TOKEN` (phase 5).
@@ -576,7 +667,21 @@ to the host**. Therefore:
   `nosniff`, `no-referrer`.
 - `CUTHULU_READ_ONLY=true` for a pure viewer.
 - TODO text is user input: rendered with `textContent` only, length-bounded.
-- Env var values never leave the Docker provider.
+- Env var values never leave the Docker provider: the detail page and API
+  list names only. The one exception is the env file editor, behind the
+  host user's sudo password on every request: its load response holds the
+  catalog service's env file values (masked in the dialog until revealed).
+  No log line, SSE event or other route carries them.
+- The env editor's helper container is **root on the host** (`privileged`,
+  `pid: host`, `nsenter` into PID 1's namespaces) — no more than the Docker
+  socket already grants, but used. It only runs fixed script templates whose
+  variable parts (unit, path, user names) come from the embedded catalog and
+  `CUTHULU_HOST_USER`, are checked against strict charsets and shell-quoted;
+  no request field reaches a command. The password and the new file travel
+  on the helper's stdin, never in its command or environment (both visible
+  in `docker inspect`). Five wrong passwords in five minutes lock the editor
+  for the rest of the window. Read-only mode hides it and its routes
+  return `403`.
 - Notification secrets (SMTP password, ping URL) are never logged, echoed in
   config errors or returned by the API (`/api/healthcheck` returns the
   dashboard link and a redacted error only). Unencrypted SMTP is refused unless

@@ -133,9 +133,11 @@ scripts/install.sh --build                            # build this checkout as c
 
 It copies `compose.yaml` and the settings to `/etc/cuthulu`: `.env` is seeded
 from the checkout's `.env` (or `.env.example`), is root-only (mode 600), and
-gets `IMAGE` and `DOCKER_GID` filled in. A re-run keeps the installed `.env`
-(only `IMAGE` and `DOCKER_GID` are updated) unless you pass `--reconfigure`,
-re-copies `compose.yaml`, pulls or builds the image, and restarts the service.
+gets `IMAGE` and `DOCKER_GID` filled in, plus `CUTHULU_HOST_USER` (you, for
+the [env editor](#editing-env-files)) unless it is already set. A re-run
+keeps the installed `.env` (only `IMAGE` and `DOCKER_GID` are updated) unless
+you pass `--reconfigure`, re-copies `compose.yaml`, pulls or builds the image
+and the env editor's helper image, and restarts the service.
 
 ```sh
 sudo $EDITOR /etc/cuthulu/.env && sudo systemctl reload cuthulu   # change settings
@@ -201,6 +203,49 @@ The list comes from [`deploy/companions/`](../deploy/companions/README.md), one
 `<name>.conf` per service; adding a service is adding a file there.
 `scripts/uninstall.sh` does not touch companion services: remove them with
 their own uninstall scripts (in their clones).
+
+### Editing env files
+
+A catalog service's detail page (Cuthulu itself and the companions above) has
+an **edit env** button: it asks for your sudo password on the host, shows the
+service's env file (secret-looking values masked, each with a `show`
+toggle), lets you change, add and delete variables, and **save & restart**
+writes the file and restarts its systemd unit, so the change takes effect.
+Saving Cuthulu's own settings restarts Cuthulu; the page reconnects.
+
+| Service | File | Restarts |
+|---------|------|----------|
+| cuthulu | `/etc/cuthulu/.env` | `cuthulu.service` |
+| auto-git-commit-tool | `/etc/auto-git-commit-tool/env` | `auto-git-commit-tool.service` |
+| claude-session-starter | `/etc/claude-session-starter/env` | `claude-session-starter.service` |
+| producer-tag-on-merge | `~/.config/producer-tag-on-merge/env` | `producer-tag-on-merge.service` (user unit) |
+
+Requirements:
+
+- **`CUTHULU_HOST_USER`** in `/etc/cuthulu/.env`: your login on the host, a
+  sudo user. `install.sh` writes it (the user who ran it); without it the
+  button is disabled. The password is checked with `sudo` as the env file's
+  owner when that is a normal user, else as this user — never as root. It
+  also says whose home `~` is.
+- The Docker socket (already mounted) and the **helper image**: each step
+  runs in a short-lived privileged `cuthulu-helper-…` container that enters
+  the host's namespaces with `nsenter` (it is root on the host, like the
+  socket itself). `install.sh` pre-pulls it, so it works offline later;
+  otherwise it is pulled on first use. `CUTHULU_HELPER_IMAGE` picks another
+  image with `nsenter` (default: `busybox`, pinned by digest).
+- systemd on the host, with `runuser`, `sudo`, `stat`, `mktemp` and coreutils.
+
+What it does: a one-file backup (`<file>.bak`, same owner and mode,
+overwritten each save), an atomic replace that keeps the owner and mode,
+then `systemctl restart` (`systemctl --user restart` as you for user units).
+Values are written exactly as typed: it never adds or removes quotes.
+Comments, blank lines and untouched lines stay as they were. Five wrong
+passwords within five minutes lock it until the window passes. Read-only mode
+hides the button. Every failed attempt also lands in the host's auth log, as
+with any sudo.
+
+Adding a `deploy/companions/<name>.conf` entry (and rebuilding) makes another
+service editable.
 
 ## Plain docker run
 
@@ -638,6 +683,11 @@ tailnet can stop, start and restart its containers. If that is too wide:
   published ports bypass `ufw`'s default rules, so use the `DOCKER-USER`
   chain;
 - set `CUTHULU_READ_ONLY=true` if you only want to watch.
+
+The [env editor](#editing-env-files) asks for your sudo password on every
+load and save; the password crosses the network in clear text over plain
+`http://`, so prefer the [HTTPS sidecar](#https-on-the-tailnet) (or
+`localhost`) when you use it.
 
 `cargo run` and the bare binary keep listening on `127.0.0.1:8686`.
 
