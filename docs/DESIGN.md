@@ -146,6 +146,10 @@ stores an explicit choice in `localStorage` and sets `data-theme` on `<html>`.
     are `--muted`, so the port numbers stand out.
   - Sections below it (`todo`, `env`, `labels`) start with a `--border` rule
     and a bold `--accent` heading; their counts stay `--muted`.
+  - A service that disappears shows `removed` (`.st.unknown`) and a
+    `--muted` ` · waiting for a new container, then back to the dashboard`
+    on the state line, with no action buttons, until its replacement
+    appears or 30 s pass (see ARCHITECTURE.md → SSE events).
 - Log viewer: monospace, line numbers or timestamps toggle, stderr tinted,
   filter box, "follow" toggle that turns off automatically when the user
   scrolls up. ANSI colors from the service are rendered with the `--ansi-*`

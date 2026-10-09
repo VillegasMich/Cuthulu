@@ -243,6 +243,15 @@ JavaScript's `text.slice(start, end)`. `fg`/`bg` are 16-color palette indices
 Every event carries non-empty `data` — browsers silently drop events whose
 data is empty.
 
+The detail page (`/services/{id}`) reads its service from `/api/events` too.
+When the id disappears, it follows a re-created container (`docker compose
+up`, a systemd unit running `docker run --rm`, …): the first service of the
+same provider with the name last seen on the page and a different id wins,
+and the page moves there with `location.replace` (so Back never lands on the
+dead id). It waits up to 30 s for one, then replaces itself with the
+dashboard; the old id coming back (a plain restart keeps it) cancels the
+wait. No backend support is involved; matching is by name only.
+
 ## Logs
 
 - Docker log frames are reassembled into lines per stream (stdout/stderr),

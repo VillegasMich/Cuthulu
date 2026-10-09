@@ -450,9 +450,12 @@ async function act(s, action) {
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(body.error || res.statusText);
     const prev = store.services.get(body.id);
-    store.services.set(body.id, body);
-    // The SSE upsert for this change will find the store already updated.
-    watchChange(prev, body);
+    // A remove that beat this reply (container re-created) must not be undone.
+    if (prev) {
+      store.services.set(body.id, body);
+      // The SSE upsert for this change will find the store already updated.
+      watchChange(prev, body);
+    }
     flash(`${action} ${s.name}: ok`);
   } catch (e) {
     flash(`${action} ${s.name}: ${e.message}`, true);
@@ -638,6 +641,8 @@ function initIndex() {
 // ── service detail + logs ──────────────────────────────────
 
 const MAX_LOG_LINES = 5000;
+/** How long a detail page waits for a re-created container before giving up. */
+const FOLLOW_MS = 30_000;
 
 function initService() {
   const id = $("#detail").dataset.id;
@@ -654,14 +659,49 @@ function initService() {
 
   const service = () => store.services.get(id);
 
+  // A re-created container (compose up, a systemd unit's `docker run --rm`)
+  // gets a new id; follow it by the name last seen here, same provider.
+  const provider = id.slice(0, id.indexOf(":") + 1);
+  let name = $("#meta h1").textContent;
+  let goneTimer = null;
+  let leaving = false;
+  const replacement = () =>
+    [...store.services.values()].find((s) => s.name === name && s.id !== id && s.id.startsWith(provider));
+  // `replace`, so Back never lands on the dead id.
+  function leave(url) {
+    leaving = true;
+    location.replace(url);
+  }
+
   render = () => {
+    if (leaving) return;
     const s = service();
     const line = $("#state-line");
     if (!s) {
-      fill(line, el("span", { class: "st unknown" }, store.loaded ? "removed" : "…"));
       $("#actions").replaceChildren();
+      if (!store.loaded) {
+        fill(line, el("span", { class: "st unknown" }, "…"));
+        return;
+      }
+      const next = replacement();
+      if (next) {
+        leave(svcUrl(next.id));
+        return;
+      }
+      goneTimer ??= setTimeout(() => {
+        const r = replacement();
+        leave(r ? svcUrl(r.id) : "/");
+      }, FOLLOW_MS);
+      fill(
+        line,
+        el("span", { class: "st unknown" }, "removed"),
+        el("span", { class: "muted" }, " · waiting for a new container, then back to the dashboard"),
+      );
       return;
     }
+    clearTimeout(goneTimer);
+    goneTimer = null;
+    name = s.name;
     const label = stateLabel(s);
     const when = UP.has(s.state) ? `up ${uptime(s)}` : s.finished_at ? `stopped ${uptime(s)}` : "";
     fill(

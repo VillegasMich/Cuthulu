@@ -51,6 +51,7 @@ Each phase should end in something runnable. Tick items as they land.
 - [x] Resizable panes: splitters for the detail view's info column, the dashboard's table columns and host panel height (remembered per browser)
 - [x] Topbar link to this machine in the Tailscale admin console (`/api/tailscale`, tailscaled LocalAPI)
 - [x] Responsive layout: phones (two-line rows, topbar `more` menu, stacked detail), tablets / split screen, wide screens; bigger tap targets on touch
+- [x] Detail page follows a re-created container by name (30 s, else back to the dashboard)
 
 ## Host panel ✓
 - [x] Read host CPU, memory, swap, load, uptime, network (addresses, ↓/↑ throughput) and disk I/O from procfs (`src/system/`, no external binaries)
