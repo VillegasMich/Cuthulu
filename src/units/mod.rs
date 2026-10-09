@@ -471,6 +471,63 @@ pub(crate) mod tests {
         assert_eq!(control(&host, None, dir.path()).placeholders(), vec![]);
     }
 
+    /// `systemctl` through the Docker helper against the real host, on the
+    /// throwaway user unit `cuthulu-systemd-control-test` only. Create it
+    /// first (see docs/ARCHITECTURE.md, "Catalog services run by systemd"):
+    /// `~/.config/systemd/user/cuthulu-systemd-control-test.service` with
+    /// `ExecStart=/usr/bin/sleep infinity`, then `systemctl --user start` it.
+    #[tokio::test]
+    #[ignore = "needs Docker, systemd and the throwaway user unit cuthulu-systemd-control-test"]
+    async fn systemctl_end_to_end() {
+        use crate::providers::docker::DockerProvider;
+
+        const UNIT: &str = "cuthulu-systemd-control-test";
+        let docker = DockerProvider::connect("unix:///var/run/docker.sock").unwrap();
+        let me = HostUser::parse(&std::env::var("USER").unwrap()).unwrap();
+        let entry = |name: &str| Entry {
+            name: name.into(),
+            container: name.into(),
+            unit: name.into(),
+            scope: UnitScope::User,
+            env_file: "/nonexistent".into(),
+        };
+        let dir = TempDir::new();
+        let units = UnitControl::with_catalog(
+            Some(Arc::new(docker)),
+            vec![entry(UNIT), entry("cuthulu-systemd-control-missing")],
+            Some(me),
+            dir.path(),
+        );
+        let show = |prop: &str| {
+            let out = std::process::Command::new("systemctl")
+                .args(["--user", "show", "-p", prop, "--value", UNIT])
+                .output()
+                .unwrap();
+            String::from_utf8(out.stdout).unwrap().trim().to_owned()
+        };
+        let svc = service(UNIT, ServiceState::Running);
+        assert_eq!(show("ActiveState"), "active", "start the unit first");
+
+        let act = |action| units.act(&svc, action);
+        assert_eq!(act(Action::Stop).await.unwrap(), Some(Outcome::Done));
+        assert_eq!(show("ActiveState"), "inactive");
+        assert_eq!(act(Action::Start).await.unwrap(), Some(Outcome::Done));
+        assert_eq!(show("ActiveState"), "active");
+        let before = show("MainPID");
+        assert_eq!(act(Action::Restart).await.unwrap(), Some(Outcome::Done));
+        assert_ne!(show("MainPID"), before, "restarted");
+        // Stop is not disable: the unit file state is left alone.
+        let file_state = show("UnitFileState");
+        assert_eq!(act(Action::Stop).await.unwrap(), Some(Outcome::Done));
+        assert_eq!(show("UnitFileState"), file_state);
+
+        let missing = service("cuthulu-systemd-control-missing", ServiceState::Running);
+        assert_eq!(
+            units.act(&missing, Action::Stop).await.unwrap(),
+            Some(Outcome::NotLoaded)
+        );
+    }
+
     #[tokio::test]
     async fn a_running_container_forgets_the_stop() {
         let host = Arc::new(MockHost::default());

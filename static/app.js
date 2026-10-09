@@ -432,9 +432,19 @@ function connect() {
 
 // ── actions ────────────────────────────────────────────────
 
+/** The `systemctl` command an action runs for a service run by a systemd unit, else null. */
+function unitCommand(s, action) {
+  if (!s.unit) return null;
+  const user = s.unit.scope === "user" ? " --user" : "";
+  // Cuthulu's own restart is queued so the reply gets out first.
+  const noBlock = s.is_self && action === "restart" ? " --no-block" : "";
+  return `systemctl${user}${noBlock} ${action} ${s.unit.name}`;
+}
+
 async function act(s, action) {
   if (readOnly || store.pending.has(s.id)) return;
-  if (action === "stop" && !confirm(`stop ${s.name}?`)) return;
+  const cmd = unitCommand(s, action);
+  if (action === "stop" && !confirm(cmd ? `stop ${s.name}?\n\n${cmd} (it starts again at boot)` : `stop ${s.name}?`)) return;
   if (action === "restart" && s.is_self && !confirm("restart cuthulu itself? the page will reconnect.")) return;
 
   store.pending.add(s.id);
@@ -477,7 +487,7 @@ function actionButtons(s, { all = false } = {}) {
         class: danger ? "btn danger" : "btn",
         type: "button",
         disabled: busy || !enabled,
-        title: action === "stop" && s.is_self ? "cuthulu cannot stop itself" : null,
+        title: action === "stop" && s.is_self ? "cuthulu cannot stop itself" : unitCommand(s, action),
         onclick: (e) => {
           e.stopPropagation();
           act(s, action);
@@ -487,7 +497,8 @@ function actionButtons(s, { all = false } = {}) {
     );
 
   if (all) {
-    return [button("start", !up), button("restart", true), button("stop", up && !s.is_self, true)];
+    // A placeholder has no container: only its unit can be started.
+    return [button("start", !up), button("restart", !s.placeholder), button("stop", up && !s.is_self, true)];
   }
   if (!up) return [button("start", true)];
   return [button("restart", true), s.is_self ? null : button("stop", true, true)].filter(Boolean);
@@ -529,6 +540,10 @@ function initIndex() {
         restartsTag(s),
         el("a", { href: svcUrl(s.id), onclick: (e) => e.stopPropagation() }, s.name),
         s.is_self ? el("span", { class: "self" }, "(this)") : null,
+        // Stopped here through its systemd unit; no container until it starts.
+        s.placeholder
+          ? el("span", { class: "held", title: `stopped with ${unitCommand(s, "stop")} · start runs ${unitCommand(s, "start")}` }, "(systemctl)")
+          : null,
       ),
       el("td", { class: "c-group", title: s.group || "" }, s.group || ""),
       el("td", { class: "c-image", title: s.image || "" }, ...imageParts(s.image)),
