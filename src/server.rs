@@ -17,6 +17,7 @@ use crate::registry::Registry;
 use crate::system::SystemMonitor;
 use crate::tailscale::Tailscale;
 use crate::todos::TodoStore;
+use crate::units::UnitControl;
 use crate::{api, web};
 
 #[derive(Clone)]
@@ -35,6 +36,8 @@ pub struct AppState {
     pub tailscale: Arc<Tailscale>,
     /// Password-gated env file editor for catalog services.
     pub env_edit: Arc<EnvEditor>,
+    /// systemd start/stop/restart for catalog services.
+    pub units: Arc<UnitControl>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -119,11 +122,27 @@ mod tests {
         read_only: bool,
         env_edit: EnvEditor,
     ) -> (Router, Arc<Registry>) {
+        let units = UnitControl::new(None, None, std::path::Path::new("/nonexistent/cuthulu"));
         let provider = Arc::new(MockProvider::with(services));
-        let registry = Registry::new(vec![provider]);
+        let (app, registry) = app_full(provider, read_only, env_edit, units).await;
+        (app, registry)
+    }
+
+    async fn app_full(
+        provider: Arc<MockProvider>,
+        read_only: bool,
+        env_edit: EnvEditor,
+        units: UnitControl,
+    ) -> (Router, Arc<Registry>) {
+        let units = Arc::new(units);
+        let registry = Registry::with_units(vec![provider], units.units());
+        for p in units.placeholders() {
+            registry.hold(p);
+        }
         // Run the watch loop once so the registry holds the mock's services.
         let shutdown = CancellationToken::new();
         let mut sub = registry.subscribe();
+        units.spawn(&registry, &shutdown);
         registry.spawn(std::time::Duration::from_secs(3600), &shutdown);
         while !matches!(
             sub.recv().await,
@@ -149,6 +168,7 @@ mod tests {
             }),
             tailscale: Arc::new(crate::tailscale::tests::disabled()),
             env_edit: Arc::new(env_edit),
+            units,
         });
         (app, registry)
     }
@@ -477,6 +497,253 @@ mod tests {
         assert_eq!(status, StatusCode::FORBIDDEN);
     }
 
+    /// Containers `tool` (system unit) and `desk` (user unit) from a test
+    /// catalog, with ids of their own like Docker's, next to `web`.
+    struct UnitsApp {
+        app: Router,
+        registry: Arc<Registry>,
+        provider: Arc<MockProvider>,
+        events: tokio::sync::mpsc::UnboundedSender<
+            crate::providers::Result<crate::providers::ProviderEvent>,
+        >,
+        tool: Service,
+    }
+
+    async fn units_app(
+        host: &Arc<MockHost>,
+        read_only: bool,
+        host_user: Option<&str>,
+        dir: &std::path::Path,
+        tool_is_self: bool,
+    ) -> UnitsApp {
+        let mut tool = crate::registry::tests::container("tool", "c0ffee01", ServiceState::Running);
+        tool.is_self = tool_is_self;
+        let desk = crate::registry::tests::container("desk", "c0ffee02", ServiceState::Running);
+        let provider = Arc::new(MockProvider::with(vec![tool.clone(), desk, web()]));
+        let (events, rx) = tokio::sync::mpsc::unbounded_channel();
+        *provider.events.lock().unwrap() = Some(rx);
+        let units = crate::units::tests::control(host, host_user, dir);
+        let (app, registry) = app_full(
+            Arc::clone(&provider),
+            read_only,
+            EnvEditor::new(None, None, false),
+            units,
+        )
+        .await;
+        UnitsApp {
+            app,
+            registry,
+            provider,
+            events,
+            tool,
+        }
+    }
+
+    fn json(body: &str) -> serde_json::Value {
+        serde_json::from_str(body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn catalog_services_stop_and_start_through_systemd() {
+        let host = Arc::new(MockHost::default());
+        let dir = crate::todos::tests::TempDir::new();
+        let t = units_app(&host, false, Some("manuel"), dir.path(), false).await;
+        let id = t.tool.id.clone();
+
+        // The list says which unit runs it.
+        let (_, _, body) = send(&t.app, get("/api/services?q=tool")).await;
+        let list = json(&body);
+        assert_eq!(
+            list[0]["unit"],
+            serde_json::json!({ "name": "tool-unit", "scope": "system" })
+        );
+        assert_eq!(list[0]["placeholder"], false);
+
+        host.answer("stop", 0, "", "");
+        let (status, _, body) = send(&t.app, post(&format!("/api/services/{id}/stop"))).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            json(&body)["id"],
+            id.as_str(),
+            "the container, still listed"
+        );
+        assert_eq!(host.ops(), ["stop"]);
+        assert!(
+            host.calls.lock().unwrap()[0]
+                .0
+                .text
+                .contains("systemctl stop 'tool-unit'")
+        );
+        assert_eq!(
+            t.provider.actions.lock().unwrap().len(),
+            0,
+            "docker untouched"
+        );
+
+        // `docker run --rm`: the container goes, the placeholder takes its row.
+        let mut sub = t.registry.subscribe();
+        t.provider.services.lock().unwrap().retain(|s| s.id != id);
+        t.events
+            .send(Ok(crate::providers::ProviderEvent::Removed(id.clone())))
+            .unwrap();
+        while !matches!(
+            sub.recv().await,
+            Ok(crate::registry::RegistryEvent::Upsert(s)) if s.placeholder
+        ) {}
+        let (_, _, body) = send(&t.app, get("/api/services?q=tool")).await;
+        let row = &json(&body)[0];
+        assert_eq!(
+            (&row["id"], &row["state"], &row["placeholder"]),
+            (&"docker:tool".into(), &"stopped".into(), &true.into())
+        );
+        assert!(
+            std::fs::read_to_string(dir.path().join("stopped.json"))
+                .unwrap()
+                .contains("\"tool\"")
+        );
+
+        // A placeholder has a page, a bare detail and no logs: never a 500.
+        let (status, _, _) = send(&t.app, get("/services/docker:tool")).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _, body) = send(&t.app, get("/api/services/docker:tool")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(json(&body)["placeholder"], true);
+        let (status, _, body) = send(&t.app, get("/api/services/docker:tool/logs")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "event: end\ndata: end\n\n");
+
+        // Start from the placeholder: systemd again, and the row is released.
+        host.answer("start", 0, "", "");
+        let (status, _, body) = send(&t.app, post("/api/services/docker:tool/start")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(host.ops(), ["stop", "start"]);
+        assert!(t.registry.get(&"docker:tool".parse().unwrap()).is_none());
+        assert!(
+            !std::fs::read_to_string(dir.path().join("stopped.json"))
+                .unwrap()
+                .contains("\"tool\"")
+        );
+        assert_eq!(t.provider.actions.lock().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn other_services_stay_on_docker() {
+        let host = Arc::new(MockHost::default());
+        let dir = crate::todos::tests::TempDir::new();
+        let t = units_app(&host, false, Some("manuel"), dir.path(), false).await;
+        let (status, _, body) =
+            send(&t.app, post(&format!("/api/services/{}/stop", web().id))).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(json(&body)["state"], "stopped");
+        assert_eq!(json(&body)["unit"], serde_json::Value::Null);
+        assert_eq!(host.ops(), Vec::<&str>::new());
+        assert_eq!(
+            *t.provider.actions.lock().unwrap(),
+            [(web().id, crate::model::Action::Stop)]
+        );
+    }
+
+    #[tokio::test]
+    async fn uninstalled_units_fall_back_to_docker() {
+        let host = Arc::new(MockHost::default());
+        let dir = crate::todos::tests::TempDir::new();
+        let t = units_app(&host, false, Some("manuel"), dir.path(), false).await;
+        host.answer("stop", crate::units::script::EXIT_NOT_LOADED, "", "");
+        let (status, _, body) =
+            send(&t.app, post(&format!("/api/services/{}/stop", t.tool.id))).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(json(&body)["state"], "stopped");
+        assert_eq!(
+            *t.provider.actions.lock().unwrap(),
+            [(t.tool.id.clone(), crate::model::Action::Stop)]
+        );
+        assert!(!dir.path().join("stopped.json").exists(), "no placeholder");
+    }
+
+    #[tokio::test]
+    async fn systemd_failures_are_shown_not_hidden() {
+        let host = Arc::new(MockHost::default());
+        let dir = crate::todos::tests::TempDir::new();
+        let t = units_app(&host, false, None, dir.path(), false).await;
+        host.answer(
+            "restart",
+            crate::units::script::EXIT_SYSTEMCTL,
+            "",
+            "Job for tool-unit.service failed.\n",
+        );
+        let (status, _, body) = send(
+            &t.app,
+            post(&format!("/api/services/{}/restart", t.tool.id)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+        assert!(
+            body.contains("systemctl restart tool-unit failed: Job for tool-unit.service failed."),
+            "{body}"
+        );
+
+        // A user unit needs CUTHULU_HOST_USER; nothing reaches the host.
+        let (status, _, body) = send(&t.app, post("/api/services/docker:c0ffee02/stop")).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(body.contains("CUTHULU_HOST_USER"), "{body}");
+        assert_eq!(host.ops(), ["restart"]);
+        assert_eq!(t.provider.actions.lock().unwrap().len(), 0, "no fallback");
+    }
+
+    #[tokio::test]
+    async fn unit_actions_respect_read_only_and_self() {
+        let host = Arc::new(MockHost::default());
+        let dir = crate::todos::tests::TempDir::new();
+        let t = units_app(&host, true, Some("manuel"), dir.path(), false).await;
+        let (status, _, _) = send(&t.app, post(&format!("/api/services/{}/stop", t.tool.id))).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        let t = units_app(&host, false, Some("manuel"), dir.path(), true).await;
+        let (status, _, body) =
+            send(&t.app, post(&format!("/api/services/{}/stop", t.tool.id))).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert!(body.contains("cannot stop itself"), "{body}");
+        assert_eq!(host.ops(), Vec::<&str>::new());
+
+        host.answer("restart", 0, "", "");
+        let (status, _, body) = send(
+            &t.app,
+            post(&format!("/api/services/{}/restart", t.tool.id)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            host.calls.lock().unwrap()[0]
+                .0
+                .text
+                .contains("systemctl --no-block restart 'tool-unit'")
+        );
+    }
+
+    #[tokio::test]
+    async fn placeholders_survive_a_restart_until_the_unit_is_gone() {
+        let host = Arc::new(MockHost::default());
+        let dir = crate::todos::tests::TempDir::new();
+        std::fs::write(
+            dir.path().join("stopped.json"),
+            r#"{"version":1,"services":{"gone":{"stopped_at":"2026-10-08T00:00:00Z"},
+                "tool":{"image":"me/tool:1","stopped_at":"2026-10-08T00:00:00Z"}}}"#,
+        )
+        .unwrap();
+        let provider = Arc::new(MockProvider::with(vec![web()]));
+        let units = crate::units::tests::control(&host, Some("manuel"), dir.path());
+        let (app, registry) =
+            app_full(provider, false, EnvEditor::new(None, None, false), units).await;
+        let names: Vec<String> = registry.snapshot().into_iter().map(|s| s.name).collect();
+        assert_eq!(names, ["web", "tool"], "only catalog names come back");
+
+        host.answer("start", crate::units::script::EXIT_NOT_LOADED, "", "");
+        let (status, _, body) = send(&app, post("/api/services/docker:tool/start")).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(body.contains("no longer installed"), "{body}");
+        assert!(registry.get(&"docker:tool".parse().unwrap()).is_none());
+    }
+
     #[tokio::test]
     async fn cannot_stop_itself() {
         let mut me = service("me", ServiceState::Running);
@@ -666,6 +933,11 @@ mod tests {
             }),
             tailscale: Arc::new(crate::tailscale::tests::disabled()),
             env_edit: Arc::new(EnvEditor::new(None, None, false)),
+            units: Arc::new(UnitControl::new(
+                None,
+                None,
+                std::path::Path::new("/nonexistent/cuthulu"),
+            )),
         });
         (app, system)
     }
@@ -686,6 +958,11 @@ mod tests {
             }),
             tailscale: Arc::new(tailscale),
             env_edit: Arc::new(EnvEditor::new(None, None, false)),
+            units: Arc::new(UnitControl::new(
+                None,
+                None,
+                std::path::Path::new("/nonexistent/cuthulu"),
+            )),
         })
     }
 
@@ -756,6 +1033,11 @@ mod tests {
             notifier: Arc::clone(&notifier),
             tailscale: Arc::new(crate::tailscale::tests::disabled()),
             env_edit: Arc::new(EnvEditor::new(None, None, false)),
+            units: Arc::new(UnitControl::new(
+                None,
+                None,
+                std::path::Path::new("/nonexistent/cuthulu"),
+            )),
         });
         (app, notifier)
     }

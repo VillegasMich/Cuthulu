@@ -27,7 +27,8 @@ const REQUIRED: [&str; 8] = [
 ];
 
 /// Which systemd instance runs a unit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum UnitScope {
     /// `systemctl`
     System,

@@ -137,6 +137,11 @@ mod tests {
             notifier: Notifier::new(&config),
             tailscale: Arc::new(crate::tailscale::tests::disabled()),
             env_edit: Arc::new(crate::envedit::EnvEditor::new(None, None, false)),
+            units: Arc::new(crate::units::UnitControl::new(
+                None,
+                None,
+                std::path::Path::new("/nonexistent/cuthulu"),
+            )),
             config: Arc::new(config),
             shutdown,
         });

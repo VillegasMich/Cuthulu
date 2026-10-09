@@ -6,6 +6,8 @@ use std::str::FromStr;
 
 use serde::Serialize;
 
+pub use crate::catalog::UnitScope;
+
 /// The kind of backend a service comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -178,6 +180,31 @@ pub struct Service {
     pub group: Option<String>,
     /// True for Cuthulu's own container.
     pub is_self: bool,
+    /// The systemd unit that runs this service (companion catalog entries
+    /// only); start, stop and restart then go through `systemctl`.
+    pub unit: Option<Unit>,
+    /// A row Cuthulu keeps for a catalog service it stopped with `systemctl`
+    /// while no container of that name exists; only `start` applies.
+    pub placeholder: bool,
+}
+
+impl Service {
+    /// Running, restarting or paused.
+    #[must_use]
+    pub const fn is_up(&self) -> bool {
+        matches!(
+            self.state,
+            ServiceState::Running | ServiceState::Restarting | ServiceState::Paused
+        )
+    }
+}
+
+/// A systemd unit, as named in the companion catalog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Unit {
+    /// Without the `.service` suffix.
+    pub name: String,
+    pub scope: UnitScope,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -210,6 +237,17 @@ pub enum Action {
     Start,
     Stop,
     Restart,
+}
+
+impl Action {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::Stop => "stop",
+            Self::Restart => "restart",
+        }
+    }
 }
 
 impl FromStr for Action {

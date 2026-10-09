@@ -6,6 +6,7 @@ use serde::Deserialize;
 use super::{ApiError, guard, parse_id};
 use crate::model::{Action, Service, ServiceDetail, ServiceState};
 use crate::server::AppState;
+use crate::units::{Outcome, UnitError};
 
 #[derive(Debug, Default, Deserialize)]
 pub struct ListQuery {
@@ -77,12 +78,61 @@ pub async fn act(
             "cuthulu is running in read-only mode".to_owned(),
         ));
     }
-    if let Some(service) = st.registry.get(&id) {
-        // Lets alerts say a stop came from here, and spot a service that
-        // something else (a systemd unit) starts again.
-        st.notifier.expect(&service.name, action == Action::Stop);
+    let service = st
+        .registry
+        .get(&id)
+        .ok_or_else(|| ApiError::NotFound(format!("service `{id}` not found")))?;
+    if service.is_self && action == Action::Stop {
+        return Err(ApiError::Forbidden("cuthulu cannot stop itself".to_owned()));
+    }
+    // Lets alerts say a stop came from here, and spot a service that
+    // something else starts again.
+    st.notifier.expect(&service.name, action == Action::Stop);
+
+    match st.units.act(&service, action).await? {
+        Some(Outcome::Done) => return Ok(Json(after_unit_action(&st, &service, action).await)),
+        Some(Outcome::NotLoaded) if service.placeholder => {
+            // Uninstalled since it was stopped here: nothing left to start.
+            st.units.forget(&service.name).await;
+            st.registry.release(&service.name);
+            return Err(ApiError::Conflict(format!(
+                "{} is no longer installed as a systemd unit",
+                service.name
+            )));
+        }
+        Some(Outcome::NotLoaded) | None => {}
     }
     Ok(Json(st.registry.act(&id, action).await?))
+}
+
+/// Updates the registry after systemd acted on `service` and returns the
+/// service as known now. The container may be gone (`docker run --rm`) or
+/// re-created under a new id.
+async fn after_unit_action(st: &AppState, service: &Service, action: Action) -> Service {
+    if action == Action::Stop {
+        // Re-read first, so a container that is already gone shows the
+        // placeholder right away.
+        st.registry.reread(&service.id).await;
+        if let Some(placeholder) = st.units.remember(service).await {
+            st.registry.hold(placeholder);
+        }
+    } else {
+        st.units.forget(&service.name).await;
+        st.registry.release(&service.name);
+        st.registry.reread(&service.id).await;
+    }
+    st.registry.current(service)
+}
+
+impl From<UnitError> for ApiError {
+    fn from(e: UnitError) -> Self {
+        let message = e.to_string();
+        match e {
+            UnitError::NoUser(_) => Self::Conflict(message),
+            UnitError::Host(_) => Self::Unavailable(message),
+            UnitError::Target(_) | UnitError::Failed(_) => Self::Internal(message),
+        }
+    }
 }
 
 fn state_name(state: ServiceState) -> &'static str {

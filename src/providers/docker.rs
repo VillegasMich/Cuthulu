@@ -574,6 +574,8 @@ fn service_from_inspect(
         ports: ports(resp),
         group: label(COMPOSE_PROJECT_LABEL).cloned(),
         is_self,
+        unit: None,
+        placeholder: false,
     })
 }
 

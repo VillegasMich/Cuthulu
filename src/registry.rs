@@ -14,7 +14,9 @@ use tokio::time::{Instant, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use crate::model::{Action, LogLine, LogOptions, ProviderKind, Service, ServiceDetail, ServiceId};
+use crate::model::{
+    Action, LogLine, LogOptions, ProviderKind, Service, ServiceDetail, ServiceId, Unit,
+};
 use crate::providers::{self, Provider, ProviderError, ProviderEvent};
 
 /// Capacity of the change broadcast. A subscriber further behind than this
@@ -61,14 +63,71 @@ pub type Result<T, E = RegistryError> = std::result::Result<T, E>;
 
 pub struct Registry {
     providers: HashMap<ProviderKind, Arc<dyn Provider>>,
-    services: Mutex<HashMap<ServiceId, Service>>,
+    services: Mutex<Services>,
     status: Mutex<HashMap<ProviderKind, ProviderStatus>>,
     tx: broadcast::Sender<RegistryEvent>,
+    /// systemd units by service name (see [`crate::units`]).
+    units: HashMap<String, Unit>,
+}
+
+/// Every service, plus the placeholder rows that stand in for a service
+/// stopped through its systemd unit while no service has its name.
+#[derive(Default)]
+struct Services {
+    by_id: HashMap<ServiceId, Service>,
+    /// Placeholders by name; each is in `by_id` only while no real service
+    /// has that name.
+    held: HashMap<String, Service>,
+}
+
+impl Services {
+    fn has_real(&self, name: &str) -> bool {
+        self.by_id
+            .values()
+            .any(|s| !s.placeholder && s.name == name)
+    }
+
+    /// Shows or hides the placeholder for `name` to match the real services.
+    fn sync_held(&mut self, name: &str, tx: &broadcast::Sender<RegistryEvent>) {
+        let Some(p) = self.held.get(name) else {
+            return;
+        };
+        let shown = self.by_id.get(&p.id);
+        if self.has_real(name) {
+            if shown.is_some_and(|s| s.placeholder) {
+                self.by_id.remove(&p.id);
+                let _ = tx.send(RegistryEvent::Remove(p.id.clone()));
+            }
+        } else if shown.is_none() {
+            self.by_id.insert(p.id.clone(), p.clone());
+            let _ = tx.send(RegistryEvent::Upsert(p.clone()));
+        }
+    }
+
+    /// Drops the placeholder for `name`, if any.
+    fn release(&mut self, name: &str, tx: &broadcast::Sender<RegistryEvent>) {
+        let Some(p) = self.held.remove(name) else {
+            return;
+        };
+        if self.by_id.get(&p.id).is_some_and(|s| s.placeholder) {
+            self.by_id.remove(&p.id);
+            let _ = tx.send(RegistryEvent::Remove(p.id));
+        }
+    }
 }
 
 impl Registry {
     #[must_use]
     pub fn new(providers: Vec<Arc<dyn Provider>>) -> Arc<Self> {
+        Self::with_units(providers, HashMap::new())
+    }
+
+    /// A registry that tags each service named in `units` with its unit.
+    #[must_use]
+    pub fn with_units(
+        providers: Vec<Arc<dyn Provider>>,
+        units: HashMap<String, Unit>,
+    ) -> Arc<Self> {
         let status = providers
             .iter()
             .map(|p| {
@@ -82,9 +141,10 @@ impl Registry {
             .collect();
         Arc::new(Self {
             providers: providers.into_iter().map(|p| (p.kind(), p)).collect(),
-            services: Mutex::new(HashMap::new()),
+            services: Mutex::default(),
             status: Mutex::new(status),
             tx: broadcast::channel(EVENT_CAPACITY).0,
+            units,
         })
     }
 
@@ -106,7 +166,7 @@ impl Registry {
     /// All services, running first, then by name.
     #[must_use]
     pub fn snapshot(&self) -> Vec<Service> {
-        let mut list: Vec<Service> = lock(&self.services).values().cloned().collect();
+        let mut list: Vec<Service> = lock(&self.services).by_id.values().cloned().collect();
         list.sort_by(|a, b| {
             (a.state.rank(), &a.name, &a.id).cmp(&(b.state.rank(), &b.name, &b.id))
         });
@@ -129,14 +189,29 @@ impl Registry {
 
     #[must_use]
     pub fn get(&self, id: &ServiceId) -> Option<Service> {
-        lock(&self.services).get(id).cloned()
+        lock(&self.services).by_id.get(id).cloned()
     }
 
-    /// Full details, read live from the provider.
+    /// Full details, read live from the provider. A placeholder has only
+    /// what its row shows.
     ///
     /// # Errors
     /// [`RegistryError::NotFound`] if the service does not exist.
     pub async fn detail(&self, id: &ServiceId) -> Result<ServiceDetail> {
+        if let Some(p) = self.get(id).filter(|s| s.placeholder) {
+            return Ok(ServiceDetail {
+                service: p,
+                command: None,
+                created_at: None,
+                restart_policy: None,
+                restart_count: 0,
+                error: None,
+                mounts: vec![],
+                networks: vec![],
+                env_keys: vec![],
+                labels: std::collections::BTreeMap::new(),
+            });
+        }
         Ok(self.provider(id)?.detail(id).await?)
     }
 
@@ -149,6 +224,10 @@ impl Registry {
         id: &ServiceId,
         opts: LogOptions,
     ) -> Result<BoxStream<'static, providers::Result<LogLine>>> {
+        // A placeholder has no container, so no logs.
+        if self.get(id).is_some_and(|s| s.placeholder) {
+            return Ok(futures_util::stream::empty().boxed());
+        }
         Ok(self.provider(id)?.logs(id, opts).await?)
     }
 
@@ -164,12 +243,86 @@ impl Registry {
         if current.is_self && action == Action::Stop {
             return Err(RegistryError::Forbidden("cuthulu cannot stop itself"));
         }
+        if current.placeholder {
+            // Only its unit can act; the provider would look up the name.
+            return Err(RegistryError::NotFound(id.clone()));
+        }
         let provider = self.provider(id)?;
         info!(service = %current.name, ?action, "action requested");
         provider.act(id, action).await?;
         self.refresh(provider.as_ref(), id).await;
         self.get(id)
             .ok_or_else(|| RegistryError::NotFound(id.clone()))
+    }
+
+    /// Re-reads `id` from its provider, after something outside the
+    /// provider (a systemd unit) acted on it.
+    pub async fn reread(&self, id: &ServiceId) {
+        if self.get(id).is_some_and(|s| s.placeholder) {
+            return;
+        }
+        if let Ok(provider) = self.provider(id) {
+            self.refresh(provider.as_ref(), id).await;
+        }
+    }
+
+    /// `before` as known now: the same id, else a service with its name
+    /// (a re-created container comes before a placeholder), else `before`.
+    #[must_use]
+    pub fn current(&self, before: &Service) -> Service {
+        let services = lock(&self.services);
+        services
+            .by_id
+            .get(&before.id)
+            .or_else(|| {
+                services
+                    .by_id
+                    .values()
+                    .filter(|s| s.name == before.name)
+                    .min_by_key(|s| s.placeholder)
+            })
+            .cloned()
+            .unwrap_or_else(|| before.clone())
+    }
+
+    /// Keeps `placeholder` as a stopped row for its name, shown while no
+    /// service has that name, until [`Registry::release`] or until a
+    /// service with that name runs ([`Registry::releases`]).
+    pub fn hold(&self, mut placeholder: Service) {
+        placeholder.placeholder = true;
+        let mut services = lock(&self.services);
+        if services
+            .by_id
+            .get(&placeholder.id)
+            .is_some_and(|s| !s.placeholder)
+        {
+            warn!(id = %placeholder.id, "placeholder id taken; not shown");
+            return;
+        }
+        let name = placeholder.name.clone();
+        if services.by_id.remove(&placeholder.id).is_some() {
+            // An older placeholder for the same name: replaced below.
+            let _ = self.tx.send(RegistryEvent::Remove(placeholder.id.clone()));
+        }
+        services.held.insert(name.clone(), placeholder);
+        services.sync_held(&name, &self.tx);
+    }
+
+    /// Drops the placeholder for `name`, if any.
+    pub fn release(&self, name: &str) {
+        lock(&self.services).release(name, &self.tx);
+    }
+
+    /// Whether seeing `service` ends the placeholder for its name: a real
+    /// service of that name is up again, whoever started it.
+    #[must_use]
+    pub fn releases(service: &Service) -> bool {
+        !service.placeholder && service.is_up()
+    }
+
+    fn tag(&self, mut service: Service) -> Service {
+        service.unit = self.units.get(&service.name).cloned();
+        service
     }
 
     fn provider(&self, id: &ServiceId) -> Result<&Arc<dyn Provider>> {
@@ -253,44 +406,67 @@ impl Registry {
     }
 
     fn upsert(&self, service: Service) {
+        let service = self.tag(service);
         let mut services = lock(&self.services);
-        if services.get(&service.id) != Some(&service) {
+        let name = service.name.clone();
+        let releases = Self::releases(&service);
+        if services.by_id.get(&service.id) != Some(&service) {
             debug!(id = %service.id, state = ?service.state, "upsert");
-            services.insert(service.id.clone(), service.clone());
+            services.by_id.insert(service.id.clone(), service.clone());
             // No receivers is fine.
             let _ = self.tx.send(RegistryEvent::Upsert(service));
+        }
+        if releases {
+            services.release(&name, &self.tx);
+        } else {
+            services.sync_held(&name, &self.tx);
         }
     }
 
     fn remove(&self, id: &ServiceId) {
         let mut services = lock(&self.services);
-        if services.remove(id).is_some() {
+        if let Some(gone) = services.by_id.remove(id) {
             debug!(%id, "remove");
             let _ = self.tx.send(RegistryEvent::Remove(id.clone()));
+            services.sync_held(&gone.name, &self.tx);
         }
     }
 
     /// Replaces every service of `kind` with `list`, broadcasting only the diff.
     fn replace_all(&self, kind: ProviderKind, list: Vec<Service>) {
         let mut services = lock(&self.services);
-        let fresh: HashMap<ServiceId, Service> =
-            list.into_iter().map(|s| (s.id.clone(), s)).collect();
+        let fresh: HashMap<ServiceId, Service> = list
+            .into_iter()
+            .map(|s| (s.id.clone(), self.tag(s)))
+            .collect();
 
         let gone: Vec<ServiceId> = services
-            .keys()
-            .filter(|id| id.kind() == kind && !fresh.contains_key(id))
-            .cloned()
+            .by_id
+            .iter()
+            .filter(|(id, s)| id.kind() == kind && !s.placeholder && !fresh.contains_key(id))
+            .map(|(id, _)| id.clone())
             .collect();
         for id in gone {
-            services.remove(&id);
+            services.by_id.remove(&id);
             let _ = self.tx.send(RegistryEvent::Remove(id));
         }
 
+        let mut up = Vec::new();
         for (id, service) in fresh {
-            if services.get(&id) != Some(&service) {
-                services.insert(id, service.clone());
+            if Self::releases(&service) {
+                up.push(service.name.clone());
+            }
+            if services.by_id.get(&id) != Some(&service) {
+                services.by_id.insert(id, service.clone());
                 let _ = self.tx.send(RegistryEvent::Upsert(service));
             }
+        }
+        for name in up {
+            services.release(&name, &self.tx);
+        }
+        let held: Vec<String> = services.held.keys().cloned().collect();
+        for name in held {
+            services.sync_held(&name, &self.tx);
         }
     }
 
@@ -336,6 +512,8 @@ pub(crate) mod tests {
             ports: vec![],
             group: None,
             is_self: false,
+            unit: None,
+            placeholder: false,
         }
     }
 
@@ -474,6 +652,160 @@ pub(crate) mod tests {
         let after = reg.act(&web.id, Action::Stop).await.unwrap();
         assert_eq!(after.state, ServiceState::Stopped);
         assert_eq!(reg.get(&web.id).unwrap().state, ServiceState::Stopped);
+    }
+
+    /// A container named `name` with an id of its own, like Docker's.
+    pub(crate) fn container(name: &str, id: &str, state: ServiceState) -> Service {
+        Service {
+            name: name.to_owned(),
+            ..service(id, state)
+        }
+    }
+
+    fn placeholder(name: &str) -> Service {
+        Service {
+            placeholder: true,
+            ..service(name, ServiceState::Stopped)
+        }
+    }
+
+    fn changes(sub: &mut broadcast::Receiver<RegistryEvent>) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Ok(ev) = sub.try_recv() {
+            out.push(match ev {
+                RegistryEvent::Upsert(s) => format!("+{}", s.id),
+                RegistryEvent::Remove(id) => format!("-{id}"),
+                RegistryEvent::Status(_) => continue,
+            });
+        }
+        out
+    }
+
+    #[test]
+    fn placeholder_shows_only_while_no_container_has_its_name() {
+        let reg = Registry::new(vec![]);
+        let old = container("tool", "c1", ServiceState::Running);
+        reg.replace_all(ProviderKind::Docker, vec![old.clone()]);
+        let mut sub = reg.subscribe();
+
+        // Stopped through systemd: the exited container is still there.
+        reg.upsert(container("tool", "c1", ServiceState::Stopped));
+        reg.hold(placeholder("tool"));
+        assert_eq!(changes(&mut sub), ["+docker:c1"]);
+        // `--rm` removes it: the placeholder takes its place.
+        reg.remove(&old.id);
+        assert_eq!(changes(&mut sub), ["-docker:c1", "+docker:tool"]);
+        assert!(reg.get(&placeholder("tool").id).unwrap().placeholder);
+        // A reconcile keeps it.
+        reg.replace_all(ProviderKind::Docker, vec![]);
+        assert_eq!(changes(&mut sub), Vec::<String>::new());
+
+        // A created (not yet running) container hides it but does not end it.
+        let new = container("tool", "c2", ServiceState::Created);
+        reg.upsert(new.clone());
+        assert_eq!(changes(&mut sub), ["+docker:c2", "-docker:tool"]);
+        reg.remove(&new.id);
+        assert_eq!(changes(&mut sub), ["-docker:c2", "+docker:tool"]);
+
+        // Running again, whoever started it: the placeholder is gone for good.
+        reg.replace_all(
+            ProviderKind::Docker,
+            vec![container("tool", "c3", ServiceState::Running)],
+        );
+        assert_eq!(changes(&mut sub), ["+docker:c3", "-docker:tool"]);
+        reg.replace_all(ProviderKind::Docker, vec![]);
+        assert_eq!(changes(&mut sub), ["-docker:c3"]);
+        assert_eq!(reg.snapshot(), vec![]);
+    }
+
+    #[test]
+    fn release_drops_the_placeholder() {
+        let reg = Registry::new(vec![]);
+        reg.hold(placeholder("tool"));
+        assert_eq!(reg.snapshot().len(), 1);
+        reg.release("tool");
+        assert_eq!(reg.snapshot(), vec![]);
+        // Never shown again once released.
+        reg.replace_all(ProviderKind::Docker, vec![]);
+        assert_eq!(reg.snapshot(), vec![]);
+        // A placeholder never takes a real service's id.
+        let real = service("tool", ServiceState::Stopped);
+        reg.replace_all(ProviderKind::Docker, vec![real.clone()]);
+        reg.hold(placeholder("x"));
+        reg.hold(Service {
+            name: "y".into(),
+            ..placeholder("tool")
+        });
+        assert_eq!(reg.get(&real.id), Some(real));
+    }
+
+    #[tokio::test]
+    async fn placeholders_have_no_logs_and_a_bare_detail() {
+        let reg = Registry::new(vec![Arc::new(MockProvider::default())]);
+        let p = placeholder("tool");
+        reg.hold(p.clone());
+        let detail = reg.detail(&p.id).await.unwrap();
+        assert_eq!(detail.service, p);
+        assert_eq!(detail.command, None);
+        let logs = reg
+            .logs(
+                &p.id,
+                LogOptions {
+                    tail: 10,
+                    follow: true,
+                },
+            )
+            .await;
+        assert_eq!(logs.unwrap().count().await, 0);
+        // The provider never acts on it (Docker would look the name up).
+        assert!(matches!(
+            reg.act(&p.id, Action::Start).await,
+            Err(RegistryError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn current_follows_the_name() {
+        let reg = Registry::new(vec![]);
+        let old = container("tool", "c1", ServiceState::Running);
+        assert_eq!(reg.current(&old), old, "unknown: as it was");
+        reg.hold(placeholder("tool"));
+        assert!(reg.current(&old).placeholder);
+        let new = container("tool", "c2", ServiceState::Running);
+        reg.upsert(new.clone());
+        assert_eq!(reg.current(&old), new);
+        reg.upsert(old.clone());
+        assert_eq!(reg.current(&old), old);
+    }
+
+    #[test]
+    fn services_are_tagged_with_their_unit() {
+        let unit = Unit {
+            name: "tool".into(),
+            scope: crate::model::UnitScope::User,
+        };
+        let reg = Registry::with_units(vec![], HashMap::from([("tool".into(), unit.clone())]));
+        reg.replace_all(
+            ProviderKind::Docker,
+            vec![
+                container("tool", "c1", ServiceState::Running),
+                service("web", ServiceState::Running),
+            ],
+        );
+        reg.upsert(container("tool", "c2", ServiceState::Running));
+        let units: Vec<_> = reg
+            .snapshot()
+            .into_iter()
+            .map(|s| (s.id.to_string(), s.unit))
+            .collect();
+        assert_eq!(
+            units,
+            [
+                ("docker:c1".to_owned(), Some(unit.clone())),
+                ("docker:c2".to_owned(), Some(unit)),
+                ("docker:web".to_owned(), None),
+            ]
+        );
     }
 
     #[tokio::test]
