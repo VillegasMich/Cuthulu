@@ -77,6 +77,11 @@ Each phase should end in something runnable. Tick items as they land.
 - [x] `edit env` dialog: masked values with per-field reveal, add / delete keys, save & restart
 - [x] `install.sh` sets `CUTHULU_HOST_USER` and pre-pulls the helper image
 
+## Catalog services run by systemd ✓
+- [x] Start / stop / restart of catalog services through `systemctl` (system or user unit) via the host helper; uninstalled unit → Docker fallback
+- [x] `unit` on the service JSON; button tooltips name the command; Cuthulu restarts itself with `--no-block`
+- [x] Placeholder rows for services stopped through their unit (`CUTHULU_DATA_DIR/stopped.json`), start from the dashboard
+
 ## Later
 - CPU / memory stats per service (on demand, only for visible rows)
 - systemd provider
