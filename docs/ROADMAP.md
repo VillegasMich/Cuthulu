@@ -50,6 +50,7 @@ Each phase should end in something runnable. Tick items as they land.
 - [x] WCAG contrast pass (text ≥ 4.5:1, controls ≥ 3:1) and data colors (`--key`, `--project`, `--tag`)
 - [x] Resizable panes: splitters for the detail view's info column, the dashboard's table columns and host panel height (remembered per browser)
 - [x] Topbar link to this machine in the Tailscale admin console (`/api/tailscale`, tailscaled LocalAPI)
+- [x] Topbar RustDesk panel: this machine's ID (copy), password state, password-gated "set new, show once" reset, open in the RustDesk app or web client (`/api/rustdesk`)
 - [x] Responsive layout: phones (two-line rows, topbar `more` menu, stacked detail), tablets / split screen, wide screens; bigger tap targets on touch
 - [x] Detail page follows a re-created container by name (30 s, else back to the dashboard)
 

@@ -13,6 +13,7 @@ use cuthulu::notify::Notifier;
 use cuthulu::providers::docker::DockerProvider;
 use cuthulu::providers::{HostControl, Provider};
 use cuthulu::registry::Registry;
+use cuthulu::rustdesk::RustDesk;
 use cuthulu::server::{self, AppState};
 use cuthulu::system::SystemMonitor;
 use cuthulu::tailscale::Tailscale;
@@ -99,9 +100,14 @@ async fn run(env: &EnvFile) -> anyhow::Result<()> {
         registry.hold(placeholder);
     }
     let env_edit = Arc::new(EnvEditor::new(
-        Some(docker as Arc<dyn HostControl>),
+        Some(Arc::clone(&docker) as Arc<dyn HostControl>),
         config.host_user.clone(),
         config.read_only,
+    ));
+    let rustdesk = Arc::new(RustDesk::new(
+        &config,
+        Some(docker as Arc<dyn HostControl>),
+        env_edit.password_limiter(),
     ));
     let todos = Arc::new(TodoStore::open(&config.data_dir));
     let shutdown = CancellationToken::new();
@@ -136,6 +142,7 @@ async fn run(env: &EnvFile) -> anyhow::Result<()> {
         tailscale,
         env_edit,
         units,
+        rustdesk,
     });
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal(shutdown.clone()))

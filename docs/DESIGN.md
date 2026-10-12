@@ -106,7 +106,7 @@ stores an explicit choice in `localStorage` and sets `data-theme` on `<html>`.
 ```
 
 - Top bar: back arrow, logo/eye, counts, notifications, connection state,
-  healthchecks.io, Tailscale, GitHub, theme toggle.
+  healthchecks.io, RustDesk, Tailscale, GitHub, theme toggle.
   - Back (`←`) goes to the previous cuthulu page in this tab's history, or to
     `/` when there is none. On the dashboard without history it is hidden but
     keeps its slot, so the eye never shifts between pages.
@@ -119,7 +119,13 @@ stores an explicit choice in `localStorage` and sets `data-theme` on `<html>`.
     machine in the Tailscale admin console in a new tab. The tooltip names
     host, IP and tailnet. Hidden (not reserved) when unavailable. No brand
     logo.
-  - healthchecks.io (left of Tailscale, only when `CUTHULU_HEALTHCHECK_URL`
+  - RustDesk (right before Tailscale, always shown): a `.btn.icon` with a
+    monitor-and-arrow glyph (no brand logo), `aria-haspopup="dialog"`,
+    `aria-expanded`, `aria-controls`. Disabled and dimmed (`.btn:disabled`)
+    with the tooltip `rustdesk not found on this host` when RustDesk does
+    not run; otherwise the tooltip is `rustdesk: <id>`. It opens the
+    RustDesk panel (see [Dropdown panel](#dropdown-panel)).
+  - healthchecks.io (left of RustDesk, only when `CUTHULU_HEALTHCHECK_URL`
     is set): a `.btn.icon` link with a pulse-line glyph; opens the
     healthchecks.io dashboard in a new tab. The tooltip states the last
     ping (`healthchecks.io: last ping ok 2m ago`, `… failed 30s ago: <error>`,
@@ -250,9 +256,10 @@ screens use the full width. No horizontal page scroll at any width from
   screen readers and the tooltip), theme toggle and a `more` text `.btn`
   (`aria-haspopup="menu"`, `aria-expanded`). `more` opens a menu box like
   the help dialog's (`--surface`, 1px `--border`, no shadow, no rounding)
-  listing `notifications`, `healthchecks.io`, `tailscale`, `github` — each
-  only while its topbar button would be shown — and a `--warn` `read-only`
-  line in read-only mode. Arrow keys / Home / End move between items; Esc
+  listing `notifications`, `healthchecks.io`, `rustdesk`, `tailscale`,
+  `github` — each only while its topbar button would be shown; `rustdesk` is
+  dimmed and skipped by the arrow keys while disabled, and opens its panel
+  under `more` — and a `--warn` `read-only` line in read-only mode. Arrow keys / Home / End move between items; Esc
   or a tap outside closes it. On the detail page `/ <name>` ellipsizes on
   one line. Above 600px the topbar is unchanged and `more` is hidden.
 - **Phone log toolbar**: filter, `follow` and an `opts` text button that
@@ -266,6 +273,34 @@ screens use the full width. No horizontal page scroll at any width from
   at least 36px through padding / min-height only (font sizes unchanged),
   and the footer's `? shortcuts` hint is hidden (`?` still opens the help
   with a keyboard).
+
+## Dropdown panel
+
+A small panel anchored under a topbar button, for a few values and actions
+that do not deserve a dialog. One use so far: RustDesk (`#rustdesk-panel`).
+
+- **Box:** the `more` menu's (`--surface`, 1px `--border`, no shadow, no
+  rounding), right edge aligned with its button (with `more` on phones),
+  `min(52ch, 100vw - 24px)` wide. A bold 13px heading, then a `kv` list,
+  then a line of text buttons. No backdrop; the page stays usable.
+- **Open / close:** the button toggles it (`aria-expanded`); Esc (back to
+  the button), a click outside, or a second click closes it. Focus moves to
+  its first control; keys typed inside never reach the page's shortcuts.
+  Redraws keep the focused control.
+- **RustDesk content:** `id` — the ID in a read-only input + `copy`;
+  `password` — `set` / `not set` (`--muted`) / `unknown`, and a
+  `new password` button (disabled with the reason as tooltip when it cannot
+  be used). `new password` opens an inline line: a password input
+  (`sudo password`), `set` (`.danger`) and `cancel`. Errors in `--err`
+  below it. Success shows the new password in a read-only input + `copy`
+  above a `--muted` note that it is shown once and gone when the panel
+  closes; closing forgets it and the sudo input. `open` tries the RustDesk
+  app, then the web client, and says so in `--muted`.
+- **Copy:** `navigator.clipboard` where the page is a secure context, else
+  the value is selected and `document.execCommand("copy")` tried; the
+  status reads `copied` or `selected · press ctrl+c`. Values are inputs, so
+  they can always be selected by hand.
+- No new color tokens.
 
 ## Splitters
 
@@ -304,7 +339,7 @@ room. One component (`.split`, `splitter()` in `app.js`), used in three places:
 ## Icons
 
 Text labels win by default. The few icons (the eye, back arrow, sun/moon,
-bell, the Tailscale network glyph, the healthchecks.io pulse line) are hand-written inline SVGs: 14px
+bell, the Tailscale network glyph, the healthchecks.io pulse line, the RustDesk monitor-and-arrow) are hand-written inline SVGs: 14px
 in a 24-unit viewBox, `fill: none`, `stroke: currentColor`, round
 caps/joins, no fills except the pupil. The one exception is the GitHub
 mark, the official filled silhouette (16-unit viewBox, still 14px) with

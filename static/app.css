@@ -710,7 +710,26 @@ body.notify-off .bell-btn.on { border-color: var(--border); color: var(--muted);
   outline: none;
 }
 .menu a.bad { color: var(--err); }
+.menu [role="menuitem"]:disabled { opacity: .45; cursor: default; background: none; }
 .menu-note { color: var(--warn); }
+
+/* ── rustdesk panel: a dropdown under its topbar button ──── */
+
+.rd-panel {
+  width: min(52ch, calc(100vw - 24px));
+  padding: 8px 12px;
+}
+.rd-panel h2 { margin: 0 0 6px; font-size: 13px; }
+.rd-panel p { margin: 4px 0 0; }
+.rd-kv { grid-template-columns: 9ch minmax(0, 1fr); margin: 0 0 6px; }
+.rd-kv dd { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.rd-kv dd .btn { margin-left: auto; padding: 0 6px; }
+.rd-field { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.rd-field .btn { padding: 0 6px; }
+.rd-val { width: 20ch; min-width: 0; font-variant-numeric: tabular-nums; }
+.rd-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; }
+.rd-line .input { flex: 1 1 16ch; min-width: 0; }
+.rd-result { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border); }
 
 /* ── responsive: tablet / split screen ≤ 1100px, phone ≤ 600px ──
    See "Layout" in docs/DESIGN.md. Desktop (> 1100px) is the default above. */
@@ -746,7 +765,7 @@ body.notify-off .bell-btn.on { border-color: var(--border); color: var(--muted);
   body[data-page="index"]:not(.can-back) #back { display: none; }
   .topbar > * { flex: none; }
   .topbar .spacer { flex: 1; }
-  #notify, #healthcheck, #tailscale, #github, #read-only { display: none; }
+  #notify, #healthcheck, #rustdesk, #tailscale, #github, #read-only { display: none; }
   .more { display: inline-block; }
   /* the eye alone; the word stays as the link's accessible name */
   .brand span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }

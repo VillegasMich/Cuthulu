@@ -52,6 +52,21 @@ impl Password {
     pub(crate) fn new(p: &str) -> Self {
         Self(p.to_owned())
     }
+
+    /// The password, if it is something sudo could accept on one line.
+    ///
+    /// # Errors
+    /// A message for the user when it is empty, too long or multi-line.
+    pub(crate) fn check(&self) -> Result<&str, &'static str> {
+        let p = self.0.as_str();
+        if p.is_empty() {
+            return Err("enter the sudo password");
+        }
+        if p.len() > MAX_PASSWORD_BYTES || p.contains(['\n', '\r', '\0']) {
+            return Err("the password must be one line of at most 1024 bytes");
+        }
+        Ok(p)
+    }
 }
 
 /// Whether the detail page offers the editor.
@@ -136,7 +151,28 @@ pub enum EnvEditError {
 
 pub type Result<T, E = EnvEditError> = std::result::Result<T, E>;
 
-/// Recent wrong passwords, shared by all clients (one operator).
+/// Recent wrong sudo passwords, shared by every password-gated feature (the
+/// env editor, the `RustDesk` password) and all clients (one operator).
+#[derive(Debug, Default)]
+pub struct PasswordLimiter(Mutex<Limiter>);
+
+impl PasswordLimiter {
+    /// `Err(wait)` while [`MAX_FAILURES`] wrong passwords are in the window.
+    pub(crate) fn check(&self) -> Result<(), Duration> {
+        self.lock().check(Instant::now())
+    }
+
+    /// Counts a wrong password.
+    pub(crate) fn fail(&self) {
+        self.lock().fail(Instant::now());
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Limiter> {
+        // Plain data, valid after any panic.
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
 #[derive(Debug, Default)]
 struct Limiter {
     failures: VecDeque<Instant>,
@@ -178,7 +214,7 @@ pub struct EnvEditor {
     catalog: Vec<Entry>,
     host_user: Option<HostUser>,
     read_only: bool,
-    limiter: Mutex<Limiter>,
+    limiter: Arc<PasswordLimiter>,
     /// One host operation at a time, so two saves cannot interleave.
     busy: tokio::sync::Mutex<()>,
 }
@@ -207,7 +243,7 @@ impl EnvEditor {
             catalog,
             host_user,
             read_only,
-            limiter: Mutex::default(),
+            limiter: Arc::default(),
             busy: tokio::sync::Mutex::new(()),
         }
     }
@@ -329,15 +365,7 @@ impl EnvEditor {
         self.limiter()
             .check(Instant::now())
             .map_err(EnvEditError::RateLimited)?;
-        let p = password.0.as_str();
-        if p.is_empty() {
-            return Err(EnvEditError::BadPassword("enter the sudo password"));
-        }
-        if p.len() > MAX_PASSWORD_BYTES || p.contains(['\n', '\r', '\0']) {
-            return Err(EnvEditError::BadPassword(
-                "the password must be one line of at most 1024 bytes",
-            ));
-        }
+        password.check().map_err(EnvEditError::BadPassword)?;
         Ok((host, target))
     }
 
@@ -387,9 +415,15 @@ impl EnvEditor {
         Ok((user, text))
     }
 
+    /// The wrong-password limiter, to share with other password-gated
+    /// features.
+    #[must_use]
+    pub fn password_limiter(&self) -> Arc<PasswordLimiter> {
+        Arc::clone(&self.limiter)
+    }
+
     fn limiter(&self) -> std::sync::MutexGuard<'_, Limiter> {
-        // Plain data, valid after any panic.
-        self.limiter.lock().unwrap_or_else(PoisonError::into_inner)
+        self.limiter.lock()
     }
 }
 
@@ -403,7 +437,7 @@ async fn run(
 }
 
 /// sudo's messages (C locale) for a user without sudo rights.
-fn refused_sudo(stderr: &str) -> bool {
+pub(crate) fn refused_sudo(stderr: &str) -> bool {
     [
         "is not in the sudoers file",
         "is not allowed to",

@@ -14,6 +14,7 @@ use crate::config::Config;
 use crate::envedit::EnvEditor;
 use crate::notify::Notifier;
 use crate::registry::Registry;
+use crate::rustdesk::RustDesk;
 use crate::system::SystemMonitor;
 use crate::tailscale::Tailscale;
 use crate::todos::TodoStore;
@@ -38,6 +39,8 @@ pub struct AppState {
     pub env_edit: Arc<EnvEditor>,
     /// systemd start/stop/restart for catalog services.
     pub units: Arc<UnitControl>,
+    /// `RustDesk` ID and password reset for the topbar.
+    pub rustdesk: Arc<RustDesk>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -169,6 +172,7 @@ mod tests {
             tailscale: Arc::new(crate::tailscale::tests::disabled()),
             env_edit: Arc::new(env_edit),
             units,
+            rustdesk: Arc::new(crate::rustdesk::tests::disabled()),
         });
         (app, registry)
     }
@@ -938,16 +942,26 @@ mod tests {
                 None,
                 std::path::Path::new("/nonexistent/cuthulu"),
             )),
+            rustdesk: Arc::new(crate::rustdesk::tests::disabled()),
         });
         (app, system)
     }
 
     fn app_with_tailscale(tailscale: Tailscale) -> Router {
+        app_with_topbar(tailscale, crate::rustdesk::tests::disabled(), false)
+    }
+
+    /// An app with no services, for the topbar's host integrations.
+    fn app_with_topbar(tailscale: Tailscale, rustdesk: RustDesk, read_only: bool) -> Router {
         let shutdown = CancellationToken::new();
+        let config = Config {
+            read_only,
+            ..Config::default()
+        };
         router(AppState {
             registry: Registry::new(vec![]),
-            system: SystemMonitor::new(&Config::default(), shutdown.clone()),
-            config: Arc::new(Config::default()),
+            system: SystemMonitor::new(&config, shutdown.clone()),
+            config: Arc::new(config),
             shutdown,
             todos: Arc::new(TodoStore::open(std::path::Path::new(
                 "/nonexistent/cuthulu",
@@ -963,6 +977,7 @@ mod tests {
                 None,
                 std::path::Path::new("/nonexistent/cuthulu"),
             )),
+            rustdesk: Arc::new(rustdesk),
         })
     }
 
@@ -1002,6 +1017,204 @@ mod tests {
         );
     }
 
+    /// An app whose host runs `RustDesk` (or not), answered by `host`.
+    fn rustdesk_app(
+        host: &Arc<MockHost>,
+        running: bool,
+        host_user: Option<&str>,
+        read_only: bool,
+    ) -> (Router, crate::todos::tests::TempDir) {
+        use crate::rustdesk::tests::{fake_proc, rustdesk};
+        let proc = fake_proc(if running { &["rustdesk"] } else { &["sshd"] });
+        let rd = rustdesk(proc.path(), Some(host), host_user, read_only);
+        let app = app_with_topbar(crate::tailscale::tests::disabled(), rd, read_only);
+        (app, proc)
+    }
+
+    async fn rustdesk_status(app: &Router) -> serde_json::Value {
+        let (status, _, body) = send(app, get("/api/rustdesk")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        serde_json::from_str(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn rustdesk_status_states() {
+        let host = Arc::new(MockHost::default());
+        let (app, _proc) = rustdesk_app(&host, false, Some("manuel"), false);
+        assert_eq!(
+            rustdesk_status(&app).await,
+            serde_json::json!({
+                "available": false,
+                "id": null,
+                "password_set": null,
+                "can_set_password": false,
+                "reason": "rustdesk not found on this host",
+            })
+        );
+        assert_eq!(host.ops(), Vec::<&str>::new(), "no helper without rustdesk");
+
+        host.answer("rustdesk-status", 0, "password yes\n71223443\n", "");
+        let (app, _proc) = rustdesk_app(&host, true, Some("manuel"), false);
+        assert_eq!(
+            rustdesk_status(&app).await,
+            serde_json::json!({
+                "available": true,
+                "id": "71223443",
+                "password_set": true,
+                "can_set_password": true,
+                "reason": null,
+            })
+        );
+
+        host.answer("rustdesk-status", 0, "password no\n71223443\n", "");
+        let (app, _proc) = rustdesk_app(&host, true, Some("manuel"), true);
+        let st = rustdesk_status(&app).await;
+        assert_eq!(st["id"], "71223443");
+        assert_eq!(st["can_set_password"], false);
+        assert_eq!(st["reason"], "cuthulu is running in read-only mode");
+
+        host.answer("rustdesk-status", 0, "password no\n71223443\n", "");
+        let (app, _proc) = rustdesk_app(&host, true, None, false);
+        let st = rustdesk_status(&app).await;
+        assert_eq!(
+            (st["available"].clone(), st["password_set"].clone()),
+            (true.into(), false.into())
+        );
+        assert_eq!(st["can_set_password"], false);
+        assert!(
+            st["reason"].as_str().unwrap().contains("CUTHULU_HOST_USER"),
+            "{st}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rustdesk_password_is_set_and_returned_once() {
+        let host = Arc::new(MockHost::default());
+        host.answer("rustdesk-status", 0, "password no\n71223443\n", "");
+        host.answer("rustdesk-password", 0, "", "");
+        host.answer("rustdesk-status", 0, "password yes\n71223443\n", "");
+        let (app, _proc) = rustdesk_app(&host, true, Some("manuel"), false);
+        let pw = serde_json::json!({ "password": "sudo-pw" });
+        let (status, headers, body) = send(&app, post_json("/api/rustdesk/password", &pw)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+        let set: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let new = set["new_password"].as_str().unwrap();
+        assert_eq!(new.len(), crate::rustdesk::PASSWORD_LEN);
+        {
+            let calls = host.calls.lock().unwrap();
+            let (script, stdin) = calls
+                .iter()
+                .find(|(s, _)| s.op == "rustdesk-password")
+                .unwrap();
+            assert_eq!(
+                stdin,
+                format!("sudo-pw\n{new}\n").as_bytes(),
+                "both on stdin"
+            );
+            assert!(!script.text.contains("sudo-pw") && !script.text.contains(new));
+        }
+        assert_eq!(
+            rustdesk_status(&app).await["password_set"],
+            true,
+            "refreshed"
+        );
+    }
+
+    #[tokio::test]
+    async fn rustdesk_password_refuses_read_only_cross_origin_and_get() {
+        let host = Arc::new(MockHost::default());
+        let pw = serde_json::json!({ "password": "pw" });
+        let (app, _proc) = rustdesk_app(&host, true, Some("manuel"), true);
+        let (status, _, body) = send(&app, post_json("/api/rustdesk/password", &pw)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert!(body.contains("read-only"), "{body}");
+
+        let (app, _proc) = rustdesk_app(&host, true, Some("manuel"), false);
+        let no_header = Request::post("/api/rustdesk/password")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(pw.to_string()))
+            .unwrap();
+        let (status, _, _) = send(&app, no_header).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let cross = Request::post("/api/rustdesk/password")
+            .header(api::CSRF_HEADER, "1")
+            .header("host", "localhost:8686")
+            .header("origin", "http://evil.example")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(pw.to_string()))
+            .unwrap();
+        let (status, _, _) = send(&app, cross).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _, _) = send(&app, get("/api/rustdesk/password")).await;
+        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "never a GET");
+        let (status, _, body) = send(
+            &app,
+            post_json(
+                "/api/rustdesk/password",
+                &serde_json::json!({ "sudo": "pw" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(!body.contains("pw\""), "{body}");
+        assert_eq!(host.ops(), Vec::<&str>::new(), "nothing reached the host");
+
+        let (app, _proc) = rustdesk_app(&host, false, Some("manuel"), false);
+        let (status, _, body) = send(&app, post_json("/api/rustdesk/password", &pw)).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(body.contains("rustdesk not found"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn rustdesk_wrong_password_is_401_then_429() {
+        let host = Arc::new(MockHost::default());
+        host.answer("rustdesk-status", 0, "password yes\n1\n", "");
+        let (app, _proc) = rustdesk_app(&host, true, Some("manuel"), false);
+        let pw = serde_json::json!({ "password": "nope" });
+        for _ in 0..crate::envedit::MAX_FAILURES {
+            host.answer(
+                "rustdesk-password",
+                crate::envedit::host::EXIT_SUDO,
+                "",
+                "Sorry, try again.",
+            );
+            host.answer("rustdesk-status", 0, "password yes\n1\n", "");
+            let (status, _, body) = send(&app, post_json("/api/rustdesk/password", &pw)).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+            assert!(body.contains("wrong password"), "{body}");
+        }
+        let (status, headers, body) = send(&app, post_json("/api/rustdesk/password", &pw)).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+        assert!(headers.contains_key(header::RETRY_AFTER));
+        let tries = host
+            .ops()
+            .iter()
+            .filter(|op| **op == "rustdesk-password")
+            .count();
+        assert_eq!(
+            tries,
+            crate::envedit::MAX_FAILURES,
+            "limited requests never reach the host"
+        );
+    }
+
+    #[tokio::test]
+    async fn pages_have_a_disabled_rustdesk_button_before_tailscale() {
+        let (app, _) = app_with(vec![], false).await;
+        let (_, _, index) = send(&app, get("/")).await;
+        let rd = index.find(r#"id="rustdesk""#).expect("rustdesk button");
+        assert!(
+            rd < index.find(r#"id="tailscale""#).unwrap(),
+            "before tailscale"
+        );
+        assert!(
+            index[rd..].starts_with(r#"id="rustdesk" class="btn icon" type="button" disabled"#),
+            "{index}"
+        );
+        assert!(index.contains(r#"id="rustdesk-panel""#));
+    }
+
     #[tokio::test]
     async fn pages_have_a_hidden_tailscale_button() {
         let (app, _) = app_with(vec![], false).await;
@@ -1038,6 +1251,7 @@ mod tests {
                 None,
                 std::path::Path::new("/nonexistent/cuthulu"),
             )),
+            rustdesk: Arc::new(crate::rustdesk::tests::disabled()),
         });
         (app, notifier)
     }
