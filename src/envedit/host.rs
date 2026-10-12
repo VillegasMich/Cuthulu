@@ -243,12 +243,15 @@ pub fn resolve_user(probe: &Probe, host_user: Option<&HostUser>) -> Result<HostU
     host_user.cloned().ok_or(TargetError::NoUser)
 }
 
-/// Lines that check the password on stdin with `sudo` as `user`; the
-/// credential cache this creates is dropped right away.
-fn sudo_check(user: &HostUser) -> String {
+/// Lines that check a password with `sudo` as `user`; the credential cache
+/// this creates is dropped right away. The password line comes from `feed`
+/// (a shell command piped into sudo, e.g. `printf '%s\n' "$pw"`), or else
+/// from the script's stdin.
+pub(crate) fn sudo_check(user: &HostUser, feed: Option<&str>) -> String {
     let u = quote(user.as_str());
+    let feed = feed.map(|f| format!("{f} | ")).unwrap_or_default();
     format!(
-        "runuser -u {u} -- sudo -S -k -v -p '' || exit {EXIT_SUDO}\n\
+        "{feed}runuser -u {u} -- sudo -S -k -v -p '' || exit {EXIT_SUDO}\n\
          runuser -u {u} -- sudo -k 2>/dev/null\n"
     )
 }
@@ -268,7 +271,7 @@ pub fn read(
             "{}[ \"$(stat -c %s -- \"$f\")\" -le {MAX_FILE_BYTES} ] || exit {EXIT_TOO_LARGE}\n\
              {}cat -- \"$f\" || exit {EXIT_FILE_IO}\n",
             prelude(target, host_user)?,
-            sudo_check(user),
+            sudo_check(user, None),
         ),
     })
 }
