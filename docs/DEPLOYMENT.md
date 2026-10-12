@@ -374,7 +374,7 @@ Optional, three independent parts — set up any of them:
 
 | Part | Tells you | Needs |
 |------|-----------|-------|
-| **Service alerts** | a watched service went down (`exited 1`, `unhealthy`, `removed`, …) and when it is back | the bell on the service; email needs SMTP, browser alerts need nothing |
+| **Service alerts** | a watched service went down (`exited 1`, `unhealthy`, `removed`, …) and when it is back | nothing for services with a restart policy or a systemd unit, the bell for the rest; email needs SMTP, browser alerts need nothing |
 | **Shutdown email** | Cuthulu was stopped (`docker stop`, `compose down`/`up`, reboot) | SMTP |
 | **Healthcheck** | the machine is off, Cuthulu crashed, or it cannot reach Docker | a free [healthchecks.io](https://healthchecks.io) check |
 
@@ -430,12 +430,16 @@ What you receive, at most:
 
 ### Choosing services
 
-Click the bell at the end of a row (or `b` on the selected row, or the
-`notify` button on a service page). Watched services are remembered by name
-in `notify.json`, so they survive container re-creation. The bell in the top
-bar opens the notifications dialog: the global on/off switch for service
-alerts, which channels are configured, and `send test` (a test email, one
-ping and a desktop notification).
+Containers with restart policy `always` or `unless-stopped`, and services
+run by a catalog systemd unit, are watched automatically from the moment
+Cuthulu sees them (`on-failure` is not: such jobs often exit 0 on purpose).
+For any other service, click the bell at the end of a row (or `b` on the
+selected row, or the `notify` button on a service page); the same bell turns
+an automatically watched service off. Choices are remembered by name in
+`notify.json` (`watched` and `muted`), so they survive container
+re-creation. The bell in the top bar opens the notifications dialog: the
+global on/off switch for service alerts, which channels are configured, and
+`send test` (a test email, one ping and a desktop notification).
 
 ### Containers managed by systemd
 

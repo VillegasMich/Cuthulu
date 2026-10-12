@@ -275,6 +275,7 @@ fn placeholder(name: &str, unit: Unit, stopped: Stopped) -> Service {
         ports: vec![],
         group: stopped.group,
         is_self: false,
+        auto_restart: false,
         unit: Some(unit),
         placeholder: true,
     }

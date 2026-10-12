@@ -13,7 +13,7 @@ use bollard::container::LogOutput;
 use bollard::errors::Error as DockerError;
 use bollard::models::{
     ContainerCreateBody, ContainerInspectResponse, ContainerStateStatusEnum, EventMessage,
-    EventMessageTypeEnum, HealthStatusEnum, HostConfig,
+    EventMessageTypeEnum, HealthStatusEnum, HostConfig, RestartPolicyNameEnum,
 };
 use bollard::query_parameters::{
     AttachContainerOptionsBuilder, CreateContainerOptionsBuilder, CreateImageOptionsBuilder,
@@ -557,6 +557,14 @@ fn service_from_inspect(
 
     let is_self = label(SELF_LABEL).is_some_and(|v| v == "true")
         || self_hint.is_some_and(|h| native.starts_with(h));
+    // `on-failure` is left out: such containers often exit 0 on purpose.
+    let auto_restart = matches!(
+        resp.host_config
+            .as_ref()
+            .and_then(|h| h.restart_policy.as_ref())
+            .and_then(|p| p.name),
+        Some(RestartPolicyNameEnum::ALWAYS | RestartPolicyNameEnum::UNLESS_STOPPED)
+    );
 
     Some(Service {
         id: ServiceId::new(ProviderKind::Docker, native),
@@ -574,6 +582,7 @@ fn service_from_inspect(
         ports: ports(resp),
         group: label(COMPOSE_PROJECT_LABEL).cloned(),
         is_self,
+        auto_restart,
         unit: None,
         placeholder: false,
     })
@@ -714,7 +723,7 @@ fn ports(resp: &ContainerInspectResponse) -> Vec<PortMapping> {
 mod tests {
     use bollard::models::{
         ContainerConfig, ContainerState, EventActor, Health as DockerHealth, NetworkSettings,
-        PortBinding,
+        PortBinding, RestartPolicy,
     };
 
     use super::*;
@@ -784,6 +793,29 @@ mod tests {
         let s = service_from_inspect(&inspect(ContainerStateStatusEnum::EXITED), None).unwrap();
         assert_eq!(s.state, ServiceState::Stopped);
         assert_eq!(s.exit_code, Some(137));
+    }
+
+    #[test]
+    fn restart_policy_always_or_unless_stopped_restarts_on_its_own() {
+        let with = |name: Option<RestartPolicyNameEnum>| {
+            let mut resp = inspect(ContainerStateStatusEnum::RUNNING);
+            resp.host_config = Some(HostConfig {
+                restart_policy: Some(RestartPolicy {
+                    name,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            service_from_inspect(&resp, None).unwrap().auto_restart
+        };
+        assert!(with(Some(RestartPolicyNameEnum::ALWAYS)));
+        assert!(with(Some(RestartPolicyNameEnum::UNLESS_STOPPED)));
+        assert!(!with(Some(RestartPolicyNameEnum::NO)));
+        assert!(!with(Some(RestartPolicyNameEnum::ON_FAILURE)));
+        assert!(!with(Some(RestartPolicyNameEnum::EMPTY)));
+        assert!(!with(None));
+        let bare = inspect(ContainerStateStatusEnum::RUNNING);
+        assert!(!service_from_inspect(&bare, None).unwrap().auto_restart);
     }
 
     #[test]

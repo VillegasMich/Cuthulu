@@ -512,6 +512,7 @@ pub(crate) mod tests {
             ports: vec![],
             group: None,
             is_self: false,
+            auto_restart: false,
             unit: None,
             placeholder: false,
         }

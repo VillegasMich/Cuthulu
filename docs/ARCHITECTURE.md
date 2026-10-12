@@ -90,7 +90,7 @@ src/
     alerts.rs          pure down/up state machine: settle, cooldown, operator actions
     mail.rs            Mailer trait, SMTP (lettre), email texts
     heartbeat.rs       healthcheck pings (ureq), latest attempt for the topbar, error redaction
-    store.rs           watched services + global switch: notify.json, atomic writes
+    store.rs           watched + muted services, global switch: notify.json, atomic writes
   tailscale.rs         tailscaled LocalAPI status → admin console link (cached, on demand)
   rustdesk.rs          RustDesk on the host: running (procfs), ID + password state (host script, cached), password reset
   hosts.rs             allowed Host names (DNS-rebinding protection), CUTHULU_ALLOWED_HOSTS
@@ -145,6 +145,7 @@ pub struct Service {
     pub ports: Vec<PortMapping>,
     pub group: Option<String>,        // compose project
     pub is_self: bool,
+    pub auto_restart: bool,           // the provider restarts it (Docker: always / unless-stopped)
     pub unit: Option<Unit>,           // {name, scope: system|user}: catalog services run by systemd
     pub placeholder: bool,            // a stopped catalog service with no container (see below)
 }
@@ -221,9 +222,9 @@ services.
 | POST   | `/api/services/{id}/todos`         | Add an item, body `{"text": "..."}`; returns the list |
 | POST   | `/api/services/{id}/todos/{todo_id}/toggle` | Flip done; returns the list |
 | POST   | `/api/services/{id}/todos/{todo_id}/delete` | Remove; returns the list |
-| GET    | `/api/notify`                      | `{enabled, watched, email, healthcheck, cooldown_minutes, restarted_elsewhere}`; never addresses or URLs |
+| GET    | `/api/notify`                      | `{enabled, watched, muted, email, healthcheck, cooldown_minutes, restarted_elsewhere}`; `watched` = opted-in names, `muted` = auto-watched names turned off; never addresses or URLs |
 | POST   | `/api/notify`                      | Global alert switch, body `{"enabled": bool}`; returns the state |
-| POST   | `/api/services/{id}/notify`        | Watch / unwatch, body `{"watch": bool}`; returns the state |
+| POST   | `/api/services/{id}/notify`        | Watch / unwatch, body `{"watch": bool}`; for an auto-watched service this unmutes / mutes it; returns the state |
 | POST   | `/api/services/{id}/env/load`      | Env file editor: body `{"password"}`; `{file, unit, scope, user, version, vars: [{key, value, secret}]}`. Catalog services only |
 | POST   | `/api/services/{id}/env/save`      | Body `{"password", "version", "vars": [{key, value}]}` (the complete new list); writes the file and restarts the unit; `{unit, restarting_self}` |
 | POST   | `/api/notify/test`                 | Send a test email and one ping now; `{email, healthcheck}` each `{status: sent\|off\|failed, error?}` |
@@ -397,10 +398,20 @@ Three independent parts, all optional:
 Modelled on `auto-git-commit-tool`'s notifications (same variable names with
 a `CUTHULU_` prefix, same TLS rules, same heartbeat semantics).
 
-- **Watched services** are chosen in the UI (bell per service) and stored
-  **by name** in `<CUTHULU_DATA_DIR>/notify.json`,
-  `{version, enabled, watched: [name]}`, with the same atomic-write and
-  never-overwrite-a-corrupt-file rules as `todos.json`. At most 500 names.
+- **Watched services:** services meant to stay up are *auto-watched* from
+  the moment Cuthulu first sees them — a Docker container with restart
+  policy `always` or `unless-stopped` (`Service.auto_restart`, read from the
+  inspect Cuthulu already does), or any service with a catalog systemd unit
+  (`Service.unit`); never Cuthulu itself (`notify::alerts::auto_watched`,
+  mirrored in `static/app.js`). Other services are opted in with the bell.
+  The bell on an auto-watched service mutes it. Stored **by name** in
+  `<CUTHULU_DATA_DIR>/notify.json`,
+  `{version, enabled, watched: [name], muted: [name]}` — `watched` holds the
+  opt-ins, `muted` the auto-watched services turned off (a file without
+  `muted` loads as none muted) — with the same atomic-write and
+  never-overwrite-a-corrupt-file rules as `todos.json`. At most 500 names in
+  each list. A service alerts iff `enabled`, not muted, and auto-watched or
+  in `watched`; the tracker keeps each name's auto flag as last seen.
   `enabled` is the global switch for service alerts (email and browser); it
   does not affect the heartbeat or the shutdown email. Writes are POST +
   same-origin and refused under `CUTHULU_READ_ONLY`.
@@ -459,7 +470,8 @@ a `CUTHULU_` prefix, same TLS rules, same heartbeat semantics).
   `localhost` / `127.0.0.1` (or an SSH tunnel to them) qualify, a plain-HTTP
   LAN address does not — then only the flash is shown.
 - **Shutdown email** after the HTTP server has stopped, within 8 s (fits
-  `docker stop`'s default 10 s grace). Lists watched services that are down.
+  `docker stop`'s default 10 s grace). Lists watched services (auto-watched
+  and opted in, minus muted) that are down.
   A crash or `SIGKILL` sends nothing; that is what the heartbeat is for.
 - **Heartbeat:** a GET to the URL right after start and then every interval.
   A ping is skipped while a provider is disconnected (Cuthulu that cannot
@@ -488,6 +500,12 @@ a `CUTHULU_` prefix, same TLS rules, same heartbeat semantics).
   URL, its path and long path segments (UUID, ping key) and cut to 160
   characters before they are logged, stored or returned.
 
+> **Decision (2026-10):** services meant to stay up are watched by default:
+> only restart policy `always` / `unless-stopped` and catalog systemd units
+> (every catalog unit, no `systemctl is-enabled` check). `on-failure` is
+> excluded because such containers often exit 0 on purpose. The bell mutes
+> them (`muted` in `notify.json`); the UI shows bell state only, no reason.
+>
 > **Decision (2026-10):** stops requested through Cuthulu's own buttons are
 > *labelled*, not suppressed (first shipped suppressed; changed after testing
 > showed a silent stop looks like broken notifications, and stops of

@@ -180,6 +180,9 @@ pub struct Service {
     pub group: Option<String>,
     /// True for Cuthulu's own container.
     pub is_self: bool,
+    /// The provider brings it back on its own when it stops (Docker restart
+    /// policy `always` or `unless-stopped`): it is meant to stay up.
+    pub auto_restart: bool,
     /// The systemd unit that runs this service (companion catalog entries
     /// only); start, stop and restart then go through `systemctl`.
     pub unit: Option<Unit>,
