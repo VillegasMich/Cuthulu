@@ -79,6 +79,18 @@ shellcheck + `scripts/test-companions.sh`, and a docker build + smoke test.
 - Keep docs in sync: if a decision in `docs/` changes, update the doc in the
   same change.
 
+## Parallel agents (orca-features)
+
+Project profile for the global `orca-features` skill; overrides its defaults.
+
+- Branches `VillegasMich/<slug>`; PRs merge with merge commits.
+- Worker dev ports `8691 + i` (`CUTHULU_BIND=127.0.0.1:<port> cargo run`);
+  8686 is the user's own `cargo run`. Stop servers by saved PID, never `pkill`.
+- Throwaway containers `cuthulu-<slug>-*`; never touch the real ones below.
+- Rust project: inline the skill's `rust-guidelines.md` in briefs.
+- Briefs touching `scripts/*.sh`: check with `koalaman/shellcheck:v0.9.0
+  --severity=info` (CI's version flags SC2015, newer ones don't).
+
 ## Commit message suggestion
 
 At the end of every feature or request that changes files, end the reply with
