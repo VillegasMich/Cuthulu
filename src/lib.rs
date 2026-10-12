@@ -15,4 +15,5 @@ pub mod server;
 pub mod system;
 pub mod tailscale;
 pub mod todos;
+pub mod units;
 mod web;

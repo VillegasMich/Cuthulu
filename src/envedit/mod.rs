@@ -444,7 +444,7 @@ fn status_error(target: &Target, status: i32, out: &HostOutput) -> EnvEditError 
 
 /// The last lines of host stderr, short, for an error message. It never
 /// holds a secret: the scripts never echo stdin.
-fn detail(stderr: &str) -> String {
+pub(crate) fn detail(stderr: &str) -> String {
     let text = stderr.trim();
     if text.is_empty() {
         return "no details".to_owned();

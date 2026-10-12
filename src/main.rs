@@ -17,6 +17,7 @@ use cuthulu::server::{self, AppState};
 use cuthulu::system::SystemMonitor;
 use cuthulu::tailscale::Tailscale;
 use cuthulu::todos::TodoStore;
+use cuthulu::units::UnitControl;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -85,7 +86,18 @@ async fn run(env: &EnvFile) -> anyhow::Result<()> {
             .with_helper_image(config.helper_image.clone()),
     );
 
-    let registry = Registry::new(vec![Arc::clone(&docker) as Arc<dyn Provider>]);
+    let units = Arc::new(UnitControl::new(
+        Some(Arc::clone(&docker) as Arc<dyn HostControl>),
+        config.host_user.clone(),
+        &config.data_dir,
+    ));
+    let registry = Registry::with_units(
+        vec![Arc::clone(&docker) as Arc<dyn Provider>],
+        units.units(),
+    );
+    for placeholder in units.placeholders() {
+        registry.hold(placeholder);
+    }
     let env_edit = Arc::new(EnvEditor::new(
         Some(docker as Arc<dyn HostControl>),
         config.host_user.clone(),
@@ -94,8 +106,10 @@ async fn run(env: &EnvFile) -> anyhow::Result<()> {
     let todos = Arc::new(TodoStore::open(&config.data_dir));
     let shutdown = CancellationToken::new();
     let notifier = Notifier::new(&config);
-    // Before the registry starts, so the first listing seeds the alert state.
+    // Before the registry starts, so the first listing seeds the alert state
+    // and ends placeholders of services that run again.
     let mut tasks = notifier.spawn(&registry, &shutdown);
+    tasks.push(units.spawn(&registry, &shutdown));
     tasks.extend(registry.spawn(config.reconcile_interval, &shutdown));
 
     let listener = tokio::net::TcpListener::bind(config.bind)
@@ -121,6 +135,7 @@ async fn run(env: &EnvFile) -> anyhow::Result<()> {
         notifier: Arc::clone(&notifier),
         tailscale,
         env_edit,
+        units,
     });
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal(shutdown.clone()))

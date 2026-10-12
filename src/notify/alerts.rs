@@ -99,10 +99,13 @@ pub struct Tracker {
 }
 
 /// `(up, detail, crashed)` for a service, or `None` when it says nothing
-/// about health: Cuthulu itself, or a state the provider could not read.
+/// about health: Cuthulu itself, a placeholder row, or a state the provider
+/// could not read.
 #[must_use]
 pub fn classify(s: &Service) -> Option<(bool, String, bool)> {
-    if s.is_self {
+    // A placeholder only stands in for a container that is gone; that
+    // container's own stop already counted.
+    if s.is_self || s.placeholder {
         return None;
     }
     let unhealthy = s.health == Health::Unhealthy;
@@ -432,6 +435,9 @@ mod tests {
         let mut me = up("me");
         me.is_self = true;
         assert_eq!(classify(&me), None);
+        let mut held = svc("a", ServiceState::Stopped, None);
+        held.placeholder = true;
+        assert_eq!(classify(&held), None, "placeholders never raise alerts");
     }
 
     #[test]

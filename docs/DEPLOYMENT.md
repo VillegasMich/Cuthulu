@@ -247,6 +247,29 @@ with any sudo.
 Adding a `deploy/companions/<name>.conf` entry (and rebuilding) makes another
 service editable.
 
+### Starting and stopping catalog services
+
+The start, stop and restart buttons of a catalog service run its systemd
+unit's `systemctl start|stop|restart` on the host (the button's tooltip shows
+the exact command; `systemctl --user …` as `CUTHULU_HOST_USER` for user units),
+through the same helper container, without a password. So **stop keeps the
+service down** instead of systemd starting a new container. It is a stop,
+not a disable: an enabled unit starts again at boot.
+
+A stopped `docker run --rm` service has no container, so Cuthulu keeps a row
+for it, marked `(systemctl)`, with a start button (remembered in
+`CUTHULU_DATA_DIR/stopped.json`, so it survives a restart of Cuthulu). The row
+goes away when you start it, or when a container of that name runs again
+however it was started. A service stopped outside Cuthulu
+(`systemctl stop` in a shell) gets no such row.
+
+Cuthulu itself cannot be stopped; restarting it runs
+`systemctl --no-block restart cuthulu` and the page reconnects. When a
+container has a catalog name but its unit is not installed on the host
+(started by hand, say), the buttons act on the container as for any other
+service. A user unit without `CUTHULU_HOST_USER`, or a failing `systemctl`,
+shows an error instead.
+
 ## Plain docker run
 
 ```sh
@@ -416,13 +439,15 @@ ping and a desktop notification).
 
 ### Containers managed by systemd
 
-Cuthulu only controls Docker. A container started by a systemd unit
-(`ExecStart=docker run --rm …` with `Restart=always`) comes back after you
-stop it in Cuthulu, because the unit starts a new one. Cuthulu notices — the
-row gets a `↻` marker, the service page says "restarts by itself", a warning
-shows in the page, and the "back up" email explains it. To keep such a
-service down, stop the unit: `systemctl stop <unit>` (or
-`systemctl --user stop <unit>`).
+Catalog services are stopped through their unit and stay down (see
+[Starting and stopping catalog services](#starting-and-stopping-catalog-services)).
+Any other container started by a systemd unit (`ExecStart=docker run --rm …`
+with `Restart=always`) comes back after you stop it in Cuthulu, because the
+unit starts a new one. Cuthulu notices — the row gets a `↻` marker, the
+service page says "restarts by itself", a warning shows in the page, and the
+"back up" email explains it. To keep such a service down, stop the unit:
+`systemctl stop <unit>` (or `systemctl --user stop <unit>`), or add it to the
+catalog.
 
 ### Desktop notifications
 

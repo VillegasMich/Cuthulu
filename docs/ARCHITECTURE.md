@@ -74,9 +74,13 @@ src/
     mod.rs             EnvEditor: password-gated load / save & restart, wrong-password rate limit
     file.rs            env file as lines: raw values, round-trip edits, masking rule
     host.rs            host command templates (probe / read / write), name checks, sudo user resolution
+  units/
+    mod.rs             UnitControl: systemctl start/stop/restart for catalog services, placeholder bookkeeping
+    script.rs          the systemctl host command template, exit codes, the command shown in tooltips
+    stopped.rs         services stopped through their unit: stopped.json, atomic writes
   build_info.rs        version + repo URL (Cargo.toml) + git commit injected at build time
   model.rs             Service, ServiceId, ServiceState, Action, LogLine, …
-  registry.rs          in-memory state, watch loop per provider, broadcast; MockProvider for tests
+  registry.rs          in-memory state, watch loop per provider, broadcast, placeholder rows; MockProvider for tests
   server.rs            AppState, router, security headers; HTTP-level tests
   web.rs               askama page handlers, embedded asset handler (ETag)
   todos.rs             per-service TODO store: JSON file, in-memory cache, atomic writes
@@ -138,6 +142,8 @@ pub struct Service {
     pub ports: Vec<PortMapping>,
     pub group: Option<String>,        // compose project
     pub is_self: bool,
+    pub unit: Option<Unit>,           // {name, scope: system|user}: catalog services run by systemd
+    pub placeholder: bool,            // a stopped catalog service with no container (see below)
 }
 ```
 
@@ -184,6 +190,12 @@ Per provider, a watch loop:
 Every change is diffed against the cache and only real changes are broadcast
 on a bounded `tokio::sync::broadcast` channel (capacity 1024).
 
+The registry tags each service whose name is a catalog `CONTAINER` with its
+`unit`, and keeps the *placeholder* rows of catalog services stopped through
+their unit (see [Catalog services run by systemd](#catalog-services-run-by-systemd)):
+a placeholder is listed only while no real service has its name, survives
+reconciles, and ends when a service of that name is running again.
+
 **No per-container polling.** Idle cost does not grow with the number of
 services.
 
@@ -197,7 +209,7 @@ services.
 | GET    | `/healthz`                         | Liveness (`ok`) |
 | GET    | `/api/services`                    | JSON list; `?q=` (name/image/project), `?state=`, `?group=` |
 | GET    | `/api/services/{id}`               | JSON detail |
-| POST   | `/api/services/{id}/start\|stop\|restart` | Returns the updated service |
+| POST   | `/api/services/{id}/start\|stop\|restart` | Catalog services: `systemctl start\|stop\|restart <unit>` on the host (unit not installed: as below); others: the provider's action. Returns the service as known afterwards: the same id, else the re-created container or placeholder with its name, else the service as it was. Stop of `is_self` is `403`; user unit without `CUTHULU_HOST_USER` `409`; helper problems `503`; `systemctl` failures `500` with its message |
 | GET    | `/api/services/{id}/logs`          | SSE log stream; `?tail=` (≤ 10 000), `?follow=` |
 | GET    | `/api/events`                      | SSE registry stream |
 | GET    | `/api/system`                      | JSON host snapshot (CPU, memory, load, network, disk I/O, opt-in top processes); 503 if procfs is unreadable |
@@ -418,13 +430,16 @@ a `CUTHULU_` prefix, same TLS rules, same heartbeat semantics).
   - *Started by something else:* a service stopped through Cuthulu that is
     running again within 15 min without a start from Cuthulu was brought
     back by something Cuthulu does not control — typically a systemd unit
-    running `docker run --rm` with `Restart=always`, where stopping the
-    container cannot keep it down. The "back up" email says so and suggests
-    stopping the unit; `GET /api/notify` lists such services in
+    that is not in the catalog, running `docker run --rm` with
+    `Restart=always`, where stopping the container cannot keep it down
+    (catalog services are stopped through their unit and stay down). The
+    "back up" email says so and suggests stopping the unit;
+    `GET /api/notify` lists such services in
     `restarted_elsewhere` (in memory, cleared when the service goes down
     again or Cuthulu restarts) and the UI marks them.
   - Outages that began before Cuthulu saw the service, or while it was not
-    watched, are not reported.
+    watched, are not reported. Placeholder rows are ignored: the container
+    they stand for already reported its stop.
   - Sending is best effort: a bounded outbox (32), 3 attempts 10 s / 20 s
     apart, no retry on permanent SMTP errors; failures are logged.
 - **Browser alerts** are computed client-side from `/api/events` while a
@@ -474,10 +489,13 @@ a `CUTHULU_` prefix, same TLS rules, same heartbeat semantics).
 > systemd-managed containers need the "started by something else" follow-up
 > anyway).
 >
-> **Decision (2026-10):** Cuthulu does not stop systemd units. It only talks
-> to Docker; reaching the host's system and user D-Bus from the container
-> would be a separate provider with its own security review. It detects and
-> explains the situation instead.
+> **Decision (2026-10, revised):** Cuthulu stops systemd units, but only
+> those of catalog services (see
+> [Catalog services run by systemd](#catalog-services-run-by-systemd)): it
+> runs `systemctl` through the host helper, with no password, for units
+> named in the embedded catalog only. Other containers started by a unit are
+> still only detected and explained ("started by something else"); a general
+> systemd provider remains future work.
 
 ## Tailscale admin link
 
@@ -590,12 +608,69 @@ check only ever sends a wrong password.
 > every page view, and every current catalog file needs it anyway (three are
 > root-owned, one is under `~`, which only that user expands).
 
+## Catalog services run by systemd
+
+A catalog service (container name = an entry's `CONTAINER`) runs as the
+entry's unit, typically `docker run --rm` with `Restart=always`: a `docker
+stop` would only make systemd start a new container. So its start, stop and
+restart buttons (and `POST /api/services/{id}/start|stop|restart`) run
+`systemctl start|stop|restart <UNIT>` on the host, through the same
+`HostControl` helper container as the env editor; every other service keeps
+the provider's action. The service JSON carries `unit: {name, scope}` so the
+buttons' tooltips name the command (`systemctl --user stop <unit>` for user
+units).
+
+- **Script:** one fixed template per action. For a user unit it runs as
+  `CUTHULU_HOST_USER` (`runuser -u <user> -- env
+  XDG_RUNTIME_DIR=/run/user/<uid> systemctl --user …`); without that
+  setting a user unit's actions fail with `409`. It first reads
+  `systemctl show -p LoadState --value <unit>`: `not-found` (the unit was
+  never installed, e.g. a container of that name started by hand) exits 20
+  and Cuthulu falls back to the provider's action. Any other failure is shown,
+  never hidden by a fallback: cannot reach the manager (exit 21) or the
+  action failed (exit 22) → `500` with systemctl's stderr; Docker or helper
+  image problems, timeouts → `503`. Timeouts: 30 s for start, 90 s for stop
+  and restart (they wait for `ExecStop` and `TimeoutStopSec`).
+- **No password:** the same trust as the Docker buttons (POST + same-origin
+  check, refused in read-only mode). The unit name comes only from the
+  embedded catalog, checked against a strict charset and shell-quoted; no
+  request field reaches the script.
+- **Stop, not disable:** an enabled unit starts again at boot.
+- **Self:** stop stays refused for `is_self`; restart runs
+  `systemctl --no-block restart cuthulu`, so the reply goes out before the
+  restart stops Cuthulu (after the usual confirmation in the UI).
+- **Placeholders:** with `--rm` the container disappears on stop, and with
+  it the row and its start button. So a stop through the unit is remembered
+  by name in `<CUTHULU_DATA_DIR>/stopped.json` (`{version, services: {name:
+  {image, group, stopped_at}}}`; catalog names only, same atomic-write and
+  never-overwrite-a-corrupt-file rules as `todos.json`), and the registry
+  lists a *placeholder* for it while no container has that name: id
+  `docker:<name>` (Docker's ids are 64 hex digits; a placeholder never takes
+  an id a real service has), `state: stopped`, `placeholder: true`, the last
+  image and project. The dashboard marks it `(systemctl)`; it has only a
+  start button, a bare detail page (no command, mounts, …) and an empty log
+  stream. A start through its unit, or a container of that name running
+  again (started from anywhere), ends it; a container of that name that is
+  merely stopped or created hides it. Services stopped outside Cuthulu get
+  no placeholder. A placeholder whose unit is no longer installed answers a
+  start with `409` and is dropped.
+- **Notifications:** stops and restarts are labelled "stopped from cuthulu"
+  as before; a unit stop keeps the service down, so it does not trip
+  "started by something else". Placeholders never raise alerts.
+
+Test against the real host only with a throwaway unit:
+`cargo test systemctl_end_to_end -- --ignored` stops, starts and restarts
+the user unit `cuthulu-systemd-control-test.service` (create it first:
+`ExecStart=/usr/bin/sleep infinity` in `~/.config/systemd/user/`, then
+`systemctl --user start` it) and checks that an uninstalled unit falls back.
+
 ## Self-awareness
 
 Cuthulu marks its own container `is_self` when the container carries the
 `cuthulu.self=true` label (set by the image) or, inside a container, when its
 id starts with `$HOSTNAME`. Stop is refused for it (UI and API); restart is
-allowed after a confirmation.
+allowed after a confirmation (as a catalog service, through
+`systemctl --no-block restart cuthulu`).
 
 ## Configuration
 
@@ -621,7 +696,7 @@ context, so containers get their settings from Compose as before.
 | `CUTHULU_PROC_DIR`       | `/proc` (compose: `/host/proc`) | procfs the host panel reads; mount the host's read-only in a container |
 | `CUTHULU_SYSTEM_SECS`    | `2`                            | Host panel sampling interval (1–60), only while someone watches |
 | `CUTHULU_SYSTEM_PROCESSES` | `false`                      | Also list the top processes (by CPU / memory) in the host panel |
-| `CUTHULU_DATA_DIR`       | `./data` (image: `/data`)      | Directory for `todos.json` and `notify.json`; created on first write |
+| `CUTHULU_DATA_DIR`       | `./data` (image: `/data`)      | Directory for `todos.json`, `notify.json` and `stopped.json`; created on first write |
 | `CUTHULU_NOTIFY_ENABLED` | `true`                         | Master switch for email and healthcheck pings (`false` keeps the settings but sends nothing) |
 | `CUTHULU_SMTP_HOST`      | —                              | SMTP server; unset = no email |
 | `CUTHULU_SMTP_PORT`      | `465`                          | `465` = implicit TLS, any other port = STARTTLS |
@@ -637,8 +712,8 @@ context, so containers get their settings from Compose as before.
 | `CUTHULU_HEALTHCHECK_LINK` | `https://healthchecks.io/`   | http(s) URL the topbar's healthchecks.io button opens (a project or check page, a self-hosted instance); not secret. Without `CUTHULU_HEALTHCHECK_URL` it has no effect and is warned about hourly |
 | `CUTHULU_TAILSCALE_SOCKET` | `/var/run/tailscale/tailscaled.sock` | tailscaled LocalAPI socket for the topbar's admin console link; set empty to disable |
 | `CUTHULU_TAILSCALE_URL`  | unset                          | Explicit http(s) URL for the Tailscale button; shown even without the socket |
-| `CUTHULU_HOST_USER`      | unset (`install.sh` sets it)   | Host login whose sudo password unlocks the env editor for root-owned files, and whose home `~` in a catalog `ENV_FILE` means. Never `root`. Unset = the editor's button is disabled |
-| `CUTHULU_HELPER_IMAGE`   | `busybox@sha256:73aaf0…` (`busybox:stable`) | Image of the env editor's host helper container; needs `nsenter` and `sh` |
+| `CUTHULU_HOST_USER`      | unset (`install.sh` sets it)   | Host login whose sudo password unlocks the env editor for root-owned files, whose home `~` in a catalog `ENV_FILE` means, and whose systemd manager runs catalog user units. Never `root`. Unset = the editor's button is disabled and user units' actions fail |
+| `CUTHULU_HELPER_IMAGE`   | `busybox@sha256:73aaf0…` (`busybox:stable`) | Image of the host helper container (env editor, catalog services' `systemctl` actions); needs `nsenter` and `sh` |
 | `RUST_LOG`               | `info`                         | Tracing filter |
 
 Planned: `CUTHULU_AUTH_TOKEN` (phase 5).
@@ -690,7 +765,9 @@ to the host**. Therefore:
   on the helper's stdin, never in its command or environment (both visible
   in `docker inspect`). Five wrong passwords in five minutes lock the editor
   for the rest of the window. Read-only mode hides it and its routes
-  return `403`.
+  return `403`. The start/stop/restart buttons of catalog services use the
+  same helper without a password (only `systemctl` on a catalog unit, the
+  same power as the Docker buttons).
 - Notification secrets (SMTP password, ping URL) are never logged, echoed in
   config errors or returned by the API (`/api/healthcheck` returns the
   dashboard link and a redacted error only). Unencrypted SMTP is refused unless

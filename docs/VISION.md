@@ -67,6 +67,7 @@ their own Linux workstation or home server.
 | 11| get a desktop notification / email when a watched service dies | Done  |
 | 12| see host CPU / memory / network at a glance                    | Done  |
 | 13| change a catalog service's env file (behind my sudo password) and restart it | Done |
+| 14| stop a catalog service run by a systemd unit and have it stay down (start it again from the dashboard) | Done |
 
 ## Success criteria for the MVP
 

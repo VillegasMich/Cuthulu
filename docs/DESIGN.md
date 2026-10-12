@@ -189,6 +189,13 @@ stores an explicit choice in `localStorage` and sets `data-theme` on `<html>`.
 - Browser alert: a desktop notification `<name> is down` / `<state> ·
   cuthulu` (`<state> · stopped from the dashboard` after a stop clicked
   there); without permission the same text in the error flash.
+- Catalog services run by systemd: their start / stop / restart buttons'
+  tooltip is the command they run (`systemctl stop <unit>`,
+  `systemctl --user …` for user units, `--no-block` for Cuthulu's own
+  restart). A placeholder row (stopped through its unit, no container) shows
+  `stopped` and a `(systemctl)` marker after the name, styled like `(this)`
+  (`--muted`, tooltip names the stop and start commands), and only a start
+  button. No new color tokens.
 - "Restarts by itself": a service stopped from Cuthulu that something else
   started again gets a `↻` (`--warn`, tooltip explains) before its name in
   the table, ` · restarts by itself` (`--warn`) on the detail state line,

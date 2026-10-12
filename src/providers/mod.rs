@@ -63,7 +63,7 @@ pub trait Provider: Send + Sync {
 }
 
 /// A `/bin/sh` script to run as root on the host, built only from fixed
-/// templates (see [`crate::envedit::host`]). It is visible to anyone who can
+/// templates (see [`crate::envedit::host`] and [`crate::units::script`]). It is visible to anyone who can
 /// inspect the helper, so it never holds a secret: those go through stdin.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostScript {
@@ -97,7 +97,8 @@ pub enum HostError {
 }
 
 /// Runs commands on the host itself, outside any container. Used only for
-/// the password-gated env file editor; nothing else needs host access.
+/// catalog services: the password-gated env file editor and `systemctl`
+/// start/stop/restart of their units.
 #[async_trait]
 pub trait HostControl: Send + Sync {
     /// Runs `script` as root on the host with `stdin` as its standard input

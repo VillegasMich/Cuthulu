@@ -117,17 +117,7 @@ impl Target {
         if !rest.split('/').all(segment_ok) {
             return Err(bad_path());
         }
-        let unit = entry.unit.as_str();
-        let unit_ok = unit
-            .bytes()
-            .next()
-            .is_some_and(|b| b.is_ascii_alphanumeric())
-            && unit
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"._@-".contains(&b));
-        if !unit_ok {
-            return Err(TargetError::BadUnit(unit.to_owned()));
-        }
+        let unit = check_unit(&entry.unit)?;
         Ok(Self {
             path,
             unit: unit.to_owned(),
@@ -167,6 +157,25 @@ impl Target {
                 )
             }
         })
+    }
+}
+
+/// `unit` if it is a plain unit name, safe on a command line.
+///
+/// # Errors
+/// [`TargetError::BadUnit`] for anything else.
+pub fn check_unit(unit: &str) -> Result<&str, TargetError> {
+    let ok = unit
+        .bytes()
+        .next()
+        .is_some_and(|b| b.is_ascii_alphanumeric())
+        && unit
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._@-".contains(&b));
+    if ok {
+        Ok(unit)
+    } else {
+        Err(TargetError::BadUnit(unit.to_owned()))
     }
 }
 
@@ -264,6 +273,30 @@ pub fn read(
     })
 }
 
+/// How to call `systemctl` for a unit in `scope`: setup lines (ending in a
+/// newline, or empty) and the command to put the verb after. A user unit
+/// runs in `user`'s manager, which `runuser` alone cannot find.
+///
+/// # Errors
+/// [`TargetError::NoUser`] for a user unit without `user`.
+pub fn systemctl(
+    scope: UnitScope,
+    user: Option<&HostUser>,
+) -> Result<(String, String), TargetError> {
+    Ok(match scope {
+        UnitScope::System => (String::new(), "systemctl".to_owned()),
+        UnitScope::User => {
+            let u = quote(user.ok_or(TargetError::NoUser)?.as_str());
+            (
+                format!("uid=$(id -u -- {u}) || exit {EXIT_NO_USER}\n"),
+                format!(
+                    "runuser -u {u} -- env XDG_RUNTIME_DIR=/run/user/\"$uid\" systemctl --user"
+                ),
+            )
+        }
+    })
+}
+
 /// Replaces the env file with stdin and restarts the unit: a `.bak` copy
 /// first (one, overwritten each time), then a temp file in the same
 /// directory with the original owner and mode, renamed over the file.
@@ -280,17 +313,8 @@ pub fn write(
 ) -> Result<HostScript, TargetError> {
     let unit = quote(&target.unit);
     let no_block = if no_block { " --no-block" } else { "" };
-    let restart = match target.scope {
-        UnitScope::System => format!("systemctl{no_block} restart {unit}"),
-        UnitScope::User => {
-            let u = quote(user.as_str());
-            format!(
-                "uid=$(id -u -- {u}) || exit {EXIT_NO_USER}\n\
-                 runuser -u {u} -- env XDG_RUNTIME_DIR=/run/user/\"$uid\" \
-                 systemctl --user{no_block} restart {unit}"
-            )
-        }
-    };
+    let (setup, systemctl) = systemctl(target.scope, Some(user))?;
+    let restart = format!("{setup}{systemctl}{no_block} restart {unit}");
     Ok(HostScript {
         op: "write",
         text: format!(
