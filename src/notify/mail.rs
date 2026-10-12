@@ -227,8 +227,9 @@ pub fn test_message(host: &str, now: &str) -> Message {
     }
 }
 
-const FOOTER: &str = "\n-- \nSent by cuthulu. Choose watched services with the bell in the \
-                      dashboard; turn alerts off there or with CUTHULU_NOTIFY_ENABLED=false.\n";
+const FOOTER: &str = "\n-- \nSent by cuthulu. Services with a restart policy or a systemd unit \
+                      are watched automatically; change that with the bell in the dashboard. \
+                      Turn alerts off there or with CUTHULU_NOTIFY_ENABLED=false.\n";
 
 fn times(n: u32) -> String {
     if n == 1 {

@@ -70,6 +70,7 @@ Each phase should end in something runnable. Tick items as they land.
 - [x] Desktop notifications in the browser, in-page flash fallback
 - [x] Bell toggle per service + global switch, persisted in `CUTHULU_DATA_DIR/notify.json`
 - [x] `send test` action (`POST /api/notify/test`)
+- [x] Auto-watch services meant to stay up (restart `always`/`unless-stopped`, catalog units); bell mutes them
 
 ## Env file editor ✓
 - [x] Companion catalog embedded at build time; container → systemd unit + env file

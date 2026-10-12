@@ -1490,9 +1490,10 @@ const ACTED_MS = 60_000;
 const RETURN_MS = 15 * 60_000;
 
 const notify = {
-  state: null, // GET /api/notify: {enabled, watched[], email, healthcheck, cooldown_minutes}
+  state: null, // GET /api/notify: {enabled, watched[], muted[], email, healthcheck, cooldown_minutes}
   error: "",
-  watched: new Set(),
+  watched: new Set(), // opted in with the bell
+  muted: new Set(), // auto-watched, turned off with the bell
   acted: new Map(), // name -> time of a stop/restart clicked here
   stopped: new Map(), // name -> time of a stop clicked here (cleared by start/restart)
   restarts: new Set(), // names started again by something else after a stop here
@@ -1504,7 +1505,20 @@ const notify = {
 /** Up for alerting purposes; mirrors classify() in src/notify/alerts.rs. */
 const alertUp = (s) => (s.state === "running" || s.state === "paused") && s.health !== "unhealthy";
 
-const watching = (name) => notify.state?.enabled === true && notify.watched.has(name);
+/** Meant to stay up, so watched unless muted; mirrors auto_watched() in src/notify/alerts.rs. */
+const autoWatched = (s) => !s.is_self && (s.auto_restart || s.unit != null);
+
+/** Watched, whatever the alerts switch says; mirrors Settings::watches() in src/notify/store.rs. */
+const watched = (s) => !notify.muted.has(s.name) && (autoWatched(s) || notify.watched.has(s.name));
+
+const watching = (s) => notify.state?.enabled === true && watched(s);
+
+/** Names of every watched service, known now or opted in, sorted. */
+function watchedNames() {
+  const names = new Set([...notify.watched].filter((n) => !notify.muted.has(n)));
+  for (const s of store.services.values()) if (watched(s)) names.add(s.name);
+  return [...names].sort();
+}
 
 function svgIcon(paths) {
   const ns = "http://www.w3.org/2000/svg";
@@ -1527,6 +1541,7 @@ function setNotifyState(st) {
   notify.state = st;
   notify.error = "";
   notify.watched = new Set(st.watched);
+  notify.muted = new Set(st.muted || []);
   for (const name of st.restarted_elsewhere || []) notify.restarts.add(name);
   document.body.classList.toggle("notify-off", !st.enabled);
   drawNotify();
@@ -1562,7 +1577,7 @@ function askPermission() {
 
 async function toggleWatch(s) {
   if (readOnly || !s || s.is_self || !notify.state) return;
-  const on = !notify.watched.has(s.name);
+  const on = !watched(s);
   if (on) askPermission();
   try {
     setNotifyState(await notifyRequest(`/api/services/${encodeURIComponent(s.id)}/notify`, { watch: on }));
@@ -1575,7 +1590,7 @@ async function toggleWatch(s) {
 /** Bell for a services row (icon only) or the detail page (`text`). */
 function bell(s, { text = false } = {}) {
   if (s.is_self || !notify.state) return text ? null : el("span", { class: "bell" });
-  const on = notify.watched.has(s.name);
+  const on = watched(s);
   const what = on
     ? notify.state.enabled ? "notifications on" : "watched, but notifications are off"
     : "notifications off";
@@ -1608,14 +1623,14 @@ function watchChange(prev, next) {
   if (prev && alertUp(prev) && !(next && alertUp(next))) notify.restarts.delete(prev.name);
   if (!prev || prev.is_self || !alertUp(prev) || (next && alertUp(next))) return;
   const name = prev.name;
-  if (!watching(name) || notify.timers.has(name)) return;
+  if (!watching(prev) || notify.timers.has(name)) return;
   const mine = Date.now() - (notify.acted.get(name) || 0) < ACTED_MS;
   notify.timers.set(
     name,
     setTimeout(() => {
       notify.timers.delete(name);
       const now = [...store.services.values()].find((s) => s.name === name);
-      if ((now && alertUp(now)) || !watching(name)) return;
+      if ((now && alertUp(now)) || !watching(now || prev)) return;
       // Gone (e.g. `docker run --rm`): say how it went down.
       const detail = stateLabel(now || next || { state: "removed" }).text;
       alertDown(name, mine ? `${detail} · stopped from the dashboard` : detail, now?.id);
@@ -1694,6 +1709,7 @@ function drawNotify() {
   }
   const configured = (on, hint) => (on ? el("span", { class: "lv-ok" }, "configured") : el("span", { class: "muted" }, `off · ${hint}`));
   const [perm, canAsk] = permissionText();
+  const names = watchedNames();
   const rows = [
     ["alerts", el(
       "span",
@@ -1720,8 +1736,8 @@ function drawNotify() {
         ),
       el("div", { class: "muted" }, "email + browser when a watched service goes down"),
     )],
-    ["watched", st.watched.length
-      ? el("span", { class: "wrap" }, st.watched.join(", "))
+    ["watched", names.length
+      ? el("span", { class: "wrap" }, names.join(", "))
       : el("span", { class: "muted" }, "none · use the bell on a service")],
     ["email", configured(st.email, "CUTHULU_SMTP_HOST")],
     ["healthcheck", configured(st.healthcheck, "CUTHULU_HEALTHCHECK_URL")],

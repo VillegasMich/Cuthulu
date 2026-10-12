@@ -48,8 +48,11 @@ const UNUSED_LINK_WARNING: Duration = Duration::from_secs(3600);
 pub struct NotifyState {
     /// Global switch for service-down alerts.
     pub enabled: bool,
-    /// Watched service names, sorted.
+    /// Services opted in with the bell, sorted. Auto-watched services
+    /// (see [`alerts::auto_watched`]) are watched without being listed.
     pub watched: Vec<String>,
+    /// Auto-watched services turned off with the bell, sorted.
+    pub muted: Vec<String>,
     /// Email is configured (and `CUTHULU_NOTIFY_ENABLED` is not false).
     pub email: bool,
     /// A healthcheck URL is configured.
@@ -255,9 +258,16 @@ impl Notifier {
         Ok(self.state_of(s))
     }
 
-    pub async fn set_watched(&self, name: &str, on: bool) -> Result<NotifyState, StoreError> {
-        let s = self.store.set_watched(name, on).await?;
-        info!(service = name, watched = on, "watch list changed");
+    /// Watches `name` or stops watching it. `auto`: the service is
+    /// [`alerts::auto_watched`].
+    pub async fn set_watched(
+        &self,
+        name: &str,
+        auto: bool,
+        on: bool,
+    ) -> Result<NotifyState, StoreError> {
+        let s = self.store.set_watched(name, auto, on).await?;
+        info!(service = name, watched = on, auto, "watch list changed");
         Ok(self.state_of(s))
     }
 
@@ -314,8 +324,9 @@ impl Notifier {
         let Some(mailer) = &self.mailer else {
             return;
         };
-        let watched = self.store.get().map(|s| s.watched).unwrap_or_default();
-        let down = lock(&self.tracker).down(|n| watched.contains(n));
+        let settings = self.store.get().ok();
+        let down = lock(&self.tracker)
+            .down(|n, auto| settings.as_ref().is_some_and(|s| s.watches(n, auto)));
         let message = mail::stop_message(
             &self.host,
             &self.started_at,
@@ -335,6 +346,7 @@ impl Notifier {
         NotifyState {
             enabled: s.enabled,
             watched: s.watched.into_iter().collect(),
+            muted: s.muted.into_iter().collect(),
             email: self.mailer.is_some(),
             healthcheck: self.pinger.is_some(),
             cooldown_minutes: self.cooldown.as_secs() / 60,
@@ -362,8 +374,10 @@ impl Notifier {
                 ev = rx.recv() => match ev {
                     Ok(RegistryEvent::Upsert(s)) => lock(&self.tracker).upsert(&s, Instant::now()),
                     Ok(RegistryEvent::Remove(id)) => {
-                        let watched = self.store.get().map(|s| s.watched).unwrap_or_default();
-                        lock(&self.tracker).remove(&id, Instant::now(), |n| watched.contains(n));
+                        let settings = self.store.get().ok();
+                        lock(&self.tracker).remove(&id, Instant::now(), |n, auto| {
+                            settings.as_ref().is_some_and(|s| s.watches(n, auto))
+                        });
                     }
                     Ok(RegistryEvent::Status(_)) => {}
                     Err(broadcast::error::RecvError::Lagged(_)) => self.resync(&registry),
@@ -379,13 +393,15 @@ impl Notifier {
     /// Brings the tracker in line with the registry after missed events.
     fn resync(&self, registry: &Registry) {
         let services = registry.snapshot();
-        let watched = self.store.get().map(|s| s.watched).unwrap_or_default();
+        let settings = self.store.get().ok();
         let now = Instant::now();
         let mut tracker = lock(&self.tracker);
         let present: HashSet<_> = services.iter().map(|s| &s.id).collect();
         for id in tracker.ids() {
             if !present.contains(&id) {
-                tracker.remove(&id, now, |n| watched.contains(n));
+                tracker.remove(&id, now, |n, auto| {
+                    settings.as_ref().is_some_and(|s| s.watches(n, auto))
+                });
             }
         }
         for s in &services {
@@ -396,8 +412,8 @@ impl Notifier {
     /// Queues the emails for every alert that is due.
     fn flush(&self) {
         let settings = self.store.get().ok();
-        let alerts = lock(&self.tracker).due(Instant::now(), |n| {
-            settings.as_ref().is_some_and(|s| s.alerts_for(n))
+        let alerts = lock(&self.tracker).due(Instant::now(), |n, auto| {
+            settings.as_ref().is_some_and(|s| s.alerts_for(n, auto))
         });
         for alert in alerts {
             info!(
@@ -503,7 +519,7 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::config::{EmailConfig, HealthcheckConfig, NotifyConfig, Secret, SmtpTls};
-    use crate::model::ServiceState;
+    use crate::model::{Service, ServiceState};
     use crate::providers::ProviderEvent;
     use crate::registry::tests::{MockProvider, service};
     use crate::todos::tests::TempDir;
@@ -636,6 +652,10 @@ pub(crate) mod tests {
         let provider = Arc::new(MockProvider::with(vec![
             web.clone(),
             service("db", ServiceState::Running),
+            Service {
+                auto_restart: true,
+                ..service("keep", ServiceState::Running)
+            },
         ]));
         *provider.events.lock().unwrap() = Some(rx);
         let registry = Registry::new(vec![provider.clone()]);
@@ -643,7 +663,7 @@ pub(crate) mod tests {
         let mailer = SmtpMailer::new(config.notify.email.as_ref().unwrap()).unwrap();
         let notifier =
             Notifier::with_parts(&config, Some(Arc::new(mailer)), Duration::from_millis(50));
-        notifier.set_watched("web", true).await.unwrap();
+        notifier.set_watched("web", false, true).await.unwrap();
         let cancel = CancellationToken::new();
         let mut tasks = notifier.spawn(&registry, &cancel);
         tasks.extend(registry.spawn(Duration::from_secs(3600), &cancel));
@@ -671,33 +691,39 @@ pub(crate) mod tests {
         tx.send(Ok(ProviderEvent::Changed(id))).unwrap();
         wait_for(&emails, 2).await;
 
+        // `keep` has a restart policy: watched without being listed.
+        let id = set_state("keep", ServiceState::Stopped, Some(0));
+        tx.send(Ok(ProviderEvent::Changed(id))).unwrap();
+        wait_for(&emails, 3).await;
+
         let report = notifier.test().await;
         assert!(matches!(report.email, ChannelResult::Sent), "{report:?}");
         assert!(
             matches!(report.healthcheck, ChannelResult::Sent),
             "{report:?}"
         );
-        wait_for(&emails, 3).await;
+        wait_for(&emails, 4).await;
 
         // A stop requested through Cuthulu is reported as such, even
         // within the cooldown of the crash above.
         notifier.expect("web", true);
         let id = set_state("web", ServiceState::Stopped, Some(0));
         tx.send(Ok(ProviderEvent::Changed(id))).unwrap();
-        wait_for(&emails, 4).await;
+        wait_for(&emails, 5).await;
 
         cancel.cancel();
         for t in tasks {
             t.await.unwrap();
         }
         notifier.stopped().await;
-        wait_for(&emails, 5).await;
+        wait_for(&emails, 6).await;
 
         assert_eq!(
             subjects(&emails),
             [
                 "[cuthulu] box: web is down (exited 1)",
                 "[cuthulu] box: web is back up",
+                "[cuthulu] box: keep is down (exited 0)",
                 "[cuthulu] box: test notification",
                 "[cuthulu] box: web stopped from cuthulu (exited 0)",
                 "[cuthulu] box: cuthulu stopped",
@@ -711,9 +737,9 @@ pub(crate) mod tests {
         );
         assert!(emails[0].contains("To: ops@example.com"), "{}", emails[0]);
         assert!(
-            emails[4].contains("Watched services down: web"),
+            emails[5].contains("Watched services down: keep, web"),
             "{}",
-            emails[4]
+            emails[5]
         );
 
         let pings = pings.lock().unwrap();

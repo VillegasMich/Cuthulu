@@ -28,7 +28,8 @@ start/stop/restart work. See the [roadmap](docs/ROADMAP.md).
   `/proc` and sampled only while someone is watching
 - Per-service TODO notes, kept in one JSON file (no database)
 - Notifications: email and desktop alerts when a watched service goes down
-  (bell per service), an email when Cuthulu stops, and a healthchecks.io
+  (automatic for restart-policy and systemd services, bell per service for
+  the rest), an email when Cuthulu stops, and a healthchecks.io
   heartbeat — see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#notifications)
 - Topbar shortcuts: this machine in the Tailscale admin console, and its
   RustDesk ID with a one-time password reset (behind the sudo password) and

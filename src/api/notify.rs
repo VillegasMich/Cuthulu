@@ -2,7 +2,8 @@
 //! and `POST /api/services/{id}/notify`.
 //!
 //! Watching is stored by service name, so the `{id}` must belong to a
-//! service the registry currently knows. Every route returns the full
+//! service the registry currently knows; whether that service is
+//! auto-watched decides how the bell's choice is stored. Every route returns the full
 //! [`NotifyState`] (except the test, which reports per channel).
 
 use axum::Json;
@@ -12,6 +13,7 @@ use axum::http::HeaderMap;
 use serde::Deserialize;
 
 use super::{ApiError, guard, parse_id};
+use crate::notify::alerts::auto_watched;
 use crate::notify::{NotifyState, StoreError, TestReport};
 use crate::server::AppState;
 
@@ -63,8 +65,11 @@ pub async fn set_watch(
         .get(&id)
         .ok_or_else(|| ApiError::NotFound(format!("service `{id}` not found")))?;
     let Json(req) = body.map_err(|e| ApiError::BadRequest(e.body_text()))?;
+    let auto = auto_watched(&service);
     Ok(Json(
-        st.notifier.set_watched(&service.name, req.watch).await?,
+        st.notifier
+            .set_watched(&service.name, auto, req.watch)
+            .await?,
     ))
 }
 
@@ -101,7 +106,7 @@ mod tests {
 
     use crate::api::CSRF_HEADER;
     use crate::config::Config;
-    use crate::model::{ProviderKind, ServiceId, ServiceState};
+    use crate::model::{ProviderKind, Service, ServiceId, ServiceState};
     use crate::notify::Notifier;
     use crate::registry::tests::{MockProvider, service};
     use crate::registry::{Registry, RegistryEvent};
@@ -116,10 +121,13 @@ mod tests {
     }
 
     async fn app_in(read_only: bool, dir: TempDir, config: Config) -> App {
-        let registry = Registry::new(vec![Arc::new(MockProvider::with(vec![service(
-            "web",
-            ServiceState::Running,
-        )]))]);
+        let registry = Registry::new(vec![Arc::new(MockProvider::with(vec![
+            service("web", ServiceState::Running),
+            Service {
+                auto_restart: true,
+                ..service("keep", ServiceState::Running)
+            },
+        ]))]);
         let shutdown = CancellationToken::new();
         let mut sub = registry.subscribe();
         registry.spawn(std::time::Duration::from_secs(3600), &shutdown);
@@ -160,6 +168,13 @@ mod tests {
         )
     }
 
+    fn keep_url() -> String {
+        format!(
+            "/api/services/{}/notify",
+            service("keep", ServiceState::Running).id
+        )
+    }
+
     async fn send(app: &App, req: Request<Body>) -> (StatusCode, Value) {
         let res = app.router.clone().oneshot(req).await.unwrap();
         let status = res.status();
@@ -192,6 +207,7 @@ mod tests {
             json!({
                 "enabled": true,
                 "watched": [],
+                "muted": [],
                 "email": false,
                 "healthcheck": false,
                 "cooldown_minutes": 15,
@@ -214,6 +230,30 @@ mod tests {
         // Persisted by name in the data dir.
         let file = std::fs::read_to_string(app.dir.path().join("notify.json")).unwrap();
         assert!(file.contains("\"enabled\": false"), "{file}");
+    }
+
+    #[tokio::test]
+    async fn bell_mutes_and_unmutes_an_auto_watched_service() {
+        let app = app(false).await;
+        let (status, body) = send(&app, post(&keep_url(), &json!({ "watch": false }))).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            (&body["watched"], &body["muted"]),
+            (&json!([]), &json!(["keep"]))
+        );
+        let file = std::fs::read_to_string(app.dir.path().join("notify.json")).unwrap();
+        let saved: Value = serde_json::from_str(&file).unwrap();
+        assert_eq!(saved["muted"], json!(["keep"]), "{file}");
+
+        let (_, body) = send(&app, post(&keep_url(), &json!({ "watch": true }))).await;
+        assert_eq!(
+            (&body["watched"], &body["muted"]),
+            (&json!([]), &json!([])),
+            "watched again without being listed"
+        );
+        // Turning off a service that is not auto-watched never mutes it.
+        let (_, body) = send(&app, post(&web_url(), &json!({ "watch": false }))).await;
+        assert_eq!(body["muted"], json!([]));
     }
 
     #[tokio::test]

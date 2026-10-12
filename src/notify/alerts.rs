@@ -20,6 +20,9 @@
 //!   started by something else (a systemd unit, a restart policy).
 //! - Services first seen while down, and services not watched when they
 //!   went down, are never reported for that outage.
+//!
+//! Whether a name is watched is the caller's call; the tracker passes along
+//! whether the service, as last seen, is [`auto_watched`].
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -35,6 +38,14 @@ pub const RETURN_WINDOW: Duration = Duration::from_secs(15 * 60);
 /// Exit codes of a normal `docker stop` (0, SIGINT, SIGKILL, SIGTERM); any
 /// other code is a crash. Mirrors `CLEAN_EXIT` in `static/app.js`.
 const CLEAN_EXIT: [i64; 4] = [0, 130, 137, 143];
+
+/// Meant to stay up, so watched unless muted: restarted by its provider on
+/// its own, or run by a catalog systemd unit. Mirrors `autoWatched` in
+/// `static/app.js`.
+#[must_use]
+pub fn auto_watched(s: &Service) -> bool {
+    !s.is_self && (s.auto_restart || s.unit.is_some())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AlertKind {
@@ -68,6 +79,8 @@ pub struct Alert {
 #[derive(Debug)]
 struct Entry {
     up: bool,
+    /// [`auto_watched`], as last seen.
+    auto: bool,
     detail: String,
     /// When `up` last flipped.
     changed_at: Instant,
@@ -147,18 +160,23 @@ impl Tracker {
         };
         self.names.insert(s.id.clone(), s.name.clone());
         self.observe(&s.name, up, detail, crashed, now);
+        if let Some(e) = self.entries.get_mut(&s.name) {
+            e.auto = auto_watched(s);
+        }
     }
 
     /// A service disappeared. Watched names count it as down ("removed");
     /// unwatched ones are forgotten, which keeps the map bounded.
-    pub fn remove(&mut self, id: &ServiceId, now: Instant, watched: impl Fn(&str) -> bool) {
+    /// `watched(name, auto)` says whether a name is watched.
+    pub fn remove(&mut self, id: &ServiceId, now: Instant, watched: impl Fn(&str, bool) -> bool) {
         let Some(name) = self.names.remove(id) else {
             return;
         };
         if self.names.values().any(|n| *n == name) {
             return;
         }
-        if watched(&name) {
+        let auto = self.entries.get(&name).is_some_and(|e| e.auto);
+        if watched(&name, auto) {
             self.observe(&name, false, "removed".to_owned(), false, now);
         } else {
             self.entries.remove(&name);
@@ -178,6 +196,7 @@ impl Tracker {
                 name.to_owned(),
                 Entry {
                     up,
+                    auto: false,
                     detail,
                     changed_at: now,
                     announced_down: None,
@@ -226,9 +245,9 @@ impl Tracker {
         }
     }
 
-    /// Alerts that are due at `now`. `alerts_for` says whether a name is
-    /// watched (and alerts are switched on).
-    pub fn due(&mut self, now: Instant, alerts_for: impl Fn(&str) -> bool) -> Vec<Alert> {
+    /// Alerts that are due at `now`. `alerts_for(name, auto)` says whether a
+    /// name is watched (and alerts are switched on).
+    pub fn due(&mut self, now: Instant, alerts_for: impl Fn(&str, bool) -> bool) -> Vec<Alert> {
         let mut out = Vec::new();
         for (name, e) in &mut self.entries {
             let cooling = e.last_down_alert.is_some_and(|t| now < t + self.cooldown);
@@ -238,7 +257,7 @@ impl Tracker {
                 .last_down_alert
                 .is_some_and(|t| e.changed_at < t + self.cooldown);
             if let Some((crash, down_for)) = e.restarted.take()
-                && alerts_for(name)
+                && alerts_for(name, e.auto)
                 && !cooling_then
             {
                 out.push(Alert {
@@ -258,7 +277,7 @@ impl Tracker {
                 continue;
             }
             if !e.up && e.announced_down.is_none() && !e.silenced {
-                if !alerts_for(name) {
+                if !alerts_for(name, e.auto) {
                     e.silenced = true;
                 } else if !cooling || e.by_operator {
                     out.push(Alert {
@@ -279,7 +298,7 @@ impl Tracker {
                 }
             } else if e.up {
                 if let Some(since) = e.announced_down.take() {
-                    if alerts_for(name) {
+                    if alerts_for(name, e.auto) {
                         out.push(Alert {
                             kind: AlertKind::Up,
                             name: name.clone(),
@@ -301,13 +320,13 @@ impl Tracker {
         out
     }
 
-    /// Names currently down, among those `watched`, sorted.
+    /// Names currently down, among those `watched(name, auto)`, sorted.
     #[must_use]
-    pub fn down(&self, watched: impl Fn(&str) -> bool) -> Vec<String> {
+    pub fn down(&self, watched: impl Fn(&str, bool) -> bool) -> Vec<String> {
         let mut names: Vec<String> = self
             .entries
             .iter()
-            .filter(|(name, e)| !e.up && watched(name))
+            .filter(|(name, e)| !e.up && watched(name, e.auto))
             .map(|(name, _)| name.clone())
             .collect();
         names.sort();
@@ -394,8 +413,20 @@ mod tests {
         svc(name, ServiceState::Stopped, Some(1))
     }
 
-    fn all(_: &str) -> bool {
+    fn all(_: &str, _: bool) -> bool {
         true
+    }
+
+    /// Watched as Cuthulu does with nothing listed: auto-watched only.
+    fn auto(_: &str, auto: bool) -> bool {
+        auto
+    }
+
+    fn restarting(name: &str) -> Service {
+        Service {
+            auto_restart: true,
+            ..up(name)
+        }
     }
 
     fn kinds(alerts: &[Alert]) -> Vec<(AlertKind, &str)> {
@@ -518,7 +549,7 @@ mod tests {
         let (mut t, c) = setup();
         t.upsert(&up("web"), c.at(0));
         t.upsert(&crashed("web"), c.at(10));
-        assert_eq!(t.due(c.at(100), |_| false), Vec::<Alert>::new());
+        assert_eq!(t.due(c.at(100), |_, _| false), Vec::<Alert>::new());
         // Watching it now does not report the outage already under way...
         assert_eq!(t.due(c.at(200), all), Vec::<Alert>::new());
         assert_eq!(t.next_due(), None);
@@ -621,7 +652,7 @@ mod tests {
         // Unwatched: nothing either.
         t.upsert(&crashed("web"), c.at(5000));
         t.upsert(&up("web"), c.at(5005));
-        assert_eq!(t.due(c.at(5005), |_| false), Vec::<Alert>::new());
+        assert_eq!(t.due(c.at(5005), |_, _| false), Vec::<Alert>::new());
         // A clean stop that comes back quickly is a restart, not a crash.
         t.upsert(&svc("web", ServiceState::Stopped, Some(0)), c.at(9000));
         t.upsert(&up("web"), c.at(9005));
@@ -635,7 +666,7 @@ mod tests {
         let db = up("db");
         t.upsert(&web, c.at(0));
         t.upsert(&db, c.at(0));
-        let watched = |n: &str| n == "web";
+        let watched = |n: &str, _| n == "web";
         t.remove(&web.id, c.at(10), watched);
         t.remove(&db.id, c.at(10), watched);
         let alerts = t.due(c.at(40), watched);
@@ -643,6 +674,54 @@ mod tests {
         assert!(
             !t.entries.contains_key("db"),
             "unwatched names are forgotten"
+        );
+    }
+
+    #[test]
+    fn auto_watched_needs_a_restart_policy_or_a_unit() {
+        assert!(!auto_watched(&up("web")));
+        assert!(auto_watched(&restarting("web")));
+        let mut unit = up("tool");
+        unit.unit = Some(crate::model::Unit {
+            name: "tool".into(),
+            scope: crate::model::UnitScope::System,
+        });
+        assert!(auto_watched(&unit));
+        let mut me = restarting("me");
+        me.is_self = true;
+        assert!(!auto_watched(&me), "never cuthulu itself");
+    }
+
+    #[test]
+    fn auto_watched_services_alert_without_a_list() {
+        let (mut t, c) = setup();
+        let web = restarting("web");
+        t.upsert(&web, c.at(0));
+        t.upsert(&up("db"), c.at(0));
+        t.upsert(&restarting("muted"), c.at(0));
+        let mut down = web.clone();
+        down.state = ServiceState::Stopped;
+        down.exit_code = Some(0);
+        t.upsert(&down, c.at(10));
+        t.upsert(&svc("db", ServiceState::Stopped, Some(0)), c.at(10));
+        let mut muted = restarting("muted");
+        muted.state = ServiceState::Stopped;
+        t.upsert(&muted, c.at(10));
+        let watched = |n: &str, a: bool| a && n != "muted";
+        assert_eq!(t.down(watched), ["web"]);
+        let alerts = t.due(c.at(40), watched);
+        assert_eq!(kinds(&alerts), [(AlertKind::Down, "exited 0")]);
+        assert_eq!(alerts[0].name, "web");
+
+        // Removed: an auto-watched name is down, an unwatched one forgotten.
+        t.remove(&up("db").id, c.at(60), auto);
+        assert!(!t.entries.contains_key("db"));
+        t.upsert(&web, c.at(100));
+        assert_eq!(kinds(&t.due(c.at(130), auto)), [(AlertKind::Up, "running")]);
+        t.remove(&web.id, c.at(2000), auto);
+        assert_eq!(
+            kinds(&t.due(c.at(2030), auto)),
+            [(AlertKind::Down, "removed")]
         );
     }
 

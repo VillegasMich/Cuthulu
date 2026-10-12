@@ -1,6 +1,10 @@
 //! Which services are watched, and the global on/off switch, persisted as
 //! `notify.json` in `CUTHULU_DATA_DIR`.
 //!
+//! Services meant to stay up (see [`super::alerts::auto_watched`]) are
+//! watched without being listed; `watched` holds the other services opted
+//! in with the bell, `muted` the auto-watched ones turned off with it.
+//!
 //! Same rules as the TODO store: keyed by service *name* (survives container
 //! re-creation), loaded once, every change written to a temporary file and
 //! renamed over the old one before the in-memory copy is updated, and a file
@@ -17,7 +21,7 @@ use tracing::{error, info};
 
 use crate::todos::write_atomic;
 
-/// Most services that can be watched at once.
+/// Most services that can be listed as watched, and as muted.
 pub const MAX_WATCHED: usize = 500;
 /// Longest service name accepted, in bytes.
 const MAX_NAME_LEN: usize = 256;
@@ -33,9 +37,12 @@ pub struct Settings {
     /// Global switch for service-down alerts (email and browser).
     #[serde(default = "enabled_by_default")]
     pub enabled: bool,
-    /// Service names to alert about.
+    /// Service names to alert about, besides the auto-watched ones.
     #[serde(default)]
     pub watched: BTreeSet<String>,
+    /// Auto-watched service names not to alert about.
+    #[serde(default)]
+    pub muted: BTreeSet<String>,
 }
 
 const fn enabled_by_default() -> bool {
@@ -48,15 +55,23 @@ impl Default for Settings {
             version: FILE_VERSION,
             enabled: true,
             watched: BTreeSet::new(),
+            muted: BTreeSet::new(),
         }
     }
 }
 
 impl Settings {
-    /// Whether a down/up alert for `name` should go out.
+    /// Whether `name` is watched; `auto`: it is auto-watched.
     #[must_use]
-    pub fn alerts_for(&self, name: &str) -> bool {
-        self.enabled && self.watched.contains(name)
+    pub fn watches(&self, name: &str, auto: bool) -> bool {
+        !self.muted.contains(name) && (auto || self.watched.contains(name))
+    }
+
+    /// Whether a down/up alert for `name` should go out; `auto`: it is
+    /// auto-watched.
+    #[must_use]
+    pub fn alerts_for(&self, name: &str, auto: bool) -> bool {
+        self.enabled && self.watches(name, auto)
     }
 }
 
@@ -128,24 +143,37 @@ impl NotifyStore {
         .await
     }
 
-    /// Adds `name` to, or removes it from, the watched set.
-    pub async fn set_watched(&self, name: &str, on: bool) -> Result<Settings, StoreError> {
+    /// Watches `name` or stops watching it. `auto`: it is auto-watched, so
+    /// turning it off mutes it rather than leaving the watched set.
+    pub async fn set_watched(
+        &self,
+        name: &str,
+        auto: bool,
+        on: bool,
+    ) -> Result<Settings, StoreError> {
         if name.is_empty() || name.len() > MAX_NAME_LEN || name.chars().any(char::is_control) {
             return Err(StoreError::Invalid(format!(
                 "invalid service name `{name}`"
             )));
         }
         self.update(|s| {
-            if !on {
-                s.watched.remove(name);
-            } else if !s.watched.contains(name) {
-                if s.watched.len() >= MAX_WATCHED {
-                    return Err(StoreError::Invalid(format!(
-                        "at most {MAX_WATCHED} services can be watched"
-                    )));
-                }
-                s.watched.insert(name.to_owned());
+            let (add_to, remove_from, what) = if on {
+                (&mut s.watched, &mut s.muted, "watched")
+            } else {
+                (&mut s.muted, &mut s.watched, "muted")
+            };
+            remove_from.remove(name);
+            // Watching an auto-watched service, or muting one that is not,
+            // needs no entry.
+            if auto == on || add_to.contains(name) {
+                return Ok(());
             }
+            if add_to.len() >= MAX_WATCHED {
+                return Err(StoreError::Invalid(format!(
+                    "at most {MAX_WATCHED} services can be {what}"
+                )));
+            }
+            add_to.insert(name.to_owned());
             Ok(())
         })
         .await
@@ -199,13 +227,13 @@ mod tests {
         assert!(s.enabled && s.watched.is_empty());
         assert!(!dir.path().join(FILE_NAME).exists(), "nothing written yet");
 
-        store.set_watched("web", true).await.unwrap();
-        store.set_watched("db", true).await.unwrap();
-        store.set_watched("db", true).await.unwrap();
-        let s = store.set_watched("web", false).await.unwrap();
+        store.set_watched("web", false, true).await.unwrap();
+        store.set_watched("db", false, true).await.unwrap();
+        store.set_watched("db", false, true).await.unwrap();
+        let s = store.set_watched("web", false, false).await.unwrap();
         assert_eq!(s.watched.iter().collect::<Vec<_>>(), ["db"]);
         let s = store.set_enabled(false).await.unwrap();
-        assert!(!s.alerts_for("db"));
+        assert!(!s.alerts_for("db", false));
 
         let reopened = NotifyStore::open(dir.path()).get().unwrap();
         assert_eq!(reopened, s);
@@ -221,11 +249,68 @@ mod tests {
     #[test]
     fn alerts_need_both_switches() {
         let mut s = Settings::default();
-        assert!(!s.alerts_for("web"));
+        assert!(!s.alerts_for("web", false));
         s.watched.insert("web".into());
-        assert!(s.alerts_for("web"));
+        assert!(s.alerts_for("web", false));
         s.enabled = false;
-        assert!(!s.alerts_for("web"));
+        assert!(!s.alerts_for("web", false));
+    }
+
+    #[test]
+    fn auto_watched_alerts_unless_muted() {
+        let mut s = Settings::default();
+        assert!(s.alerts_for("web", true), "no entry needed");
+        s.muted.insert("web".into());
+        assert!(!s.alerts_for("web", true));
+        assert!(!s.watches("web", true));
+        s.watched.insert("web".into());
+        assert!(!s.alerts_for("web", false), "muted wins");
+        s.muted.clear();
+        s.enabled = false;
+        assert!(!s.alerts_for("web", true));
+        assert!(s.watches("web", true), "still watched while switched off");
+    }
+
+    #[tokio::test]
+    async fn bell_mutes_auto_watched_and_lists_the_rest() {
+        let dir = TempDir::new();
+        let store = NotifyStore::open(dir.path());
+        // Auto-watched: off mutes, on unmutes, neither lists it as watched.
+        let s = store.set_watched("web", true, false).await.unwrap();
+        assert_eq!(s.muted.iter().collect::<Vec<_>>(), ["web"]);
+        assert_eq!(s.watched.iter().collect::<Vec<_>>(), Vec::<&String>::new());
+        assert!(!s.alerts_for("web", true));
+        let reopened = NotifyStore::open(dir.path()).get().unwrap();
+        assert_eq!(reopened, s, "muted persists");
+        let s = store.set_watched("web", true, true).await.unwrap();
+        assert_eq!(s, Settings::default());
+        assert!(s.alerts_for("web", true));
+
+        // Not auto-watched: on lists it as watched, off removes it, no mute.
+        let s = store.set_watched("db", false, true).await.unwrap();
+        assert_eq!(s.watched.iter().collect::<Vec<_>>(), ["db"]);
+        let s = store.set_watched("db", false, false).await.unwrap();
+        assert_eq!(s, Settings::default());
+
+        // A name in both lists (policy changed meanwhile) ends in one.
+        store.set_watched("x", false, true).await.unwrap();
+        let s = store.set_watched("x", true, false).await.unwrap();
+        assert_eq!(s.watched, BTreeSet::new());
+        assert_eq!(s.muted.iter().collect::<Vec<_>>(), ["x"]);
+    }
+
+    #[tokio::test]
+    async fn file_without_muted_loads_and_keeps_watched() {
+        let dir = TempDir::new();
+        fs::write(
+            dir.path().join(FILE_NAME),
+            r#"{ "version": 1, "enabled": true, "watched": ["web", "db"] }"#,
+        )
+        .unwrap();
+        let s = NotifyStore::open(dir.path()).get().unwrap();
+        assert_eq!(s.watched.iter().collect::<Vec<_>>(), ["db", "web"]);
+        assert_eq!(s.muted, BTreeSet::new());
+        assert!(s.alerts_for("web", false));
     }
 
     #[tokio::test]
@@ -234,20 +319,25 @@ mod tests {
         let store = NotifyStore::open(dir.path());
         for bad in [String::new(), "a\nb".into(), "x".repeat(MAX_NAME_LEN + 1)] {
             assert!(matches!(
-                store.set_watched(&bad, true).await,
+                store.set_watched(&bad, false, true).await,
                 Err(StoreError::Invalid(_))
             ));
         }
         for i in 0..MAX_WATCHED {
-            store.set_watched(&format!("s{i}"), true).await.unwrap();
+            store
+                .set_watched(&format!("s{i}"), false, true)
+                .await
+                .unwrap();
         }
         assert!(matches!(
-            store.set_watched("one-more", true).await,
+            store.set_watched("one-more", false, true).await,
             Err(StoreError::Invalid(_))
         ));
+        // Muting has a cap of its own.
+        store.set_watched("auto", true, false).await.unwrap();
         // Removing and re-adding existing names still works at the cap.
-        store.set_watched("s0", true).await.unwrap();
-        store.set_watched("s0", false).await.unwrap();
+        store.set_watched("s0", false, true).await.unwrap();
+        store.set_watched("s0", false, false).await.unwrap();
     }
 
     #[tokio::test]
@@ -267,7 +357,7 @@ mod tests {
         let blocker = dir.path().join("file");
         fs::write(&blocker, "").unwrap();
         let store = NotifyStore::open(&blocker.join("data"));
-        let err = store.set_watched("web", true).await.unwrap_err();
+        let err = store.set_watched("web", false, true).await.unwrap_err();
         assert!(err.to_string().contains("cannot save settings"), "{err}");
         assert!(store.get().unwrap().watched.is_empty());
     }
