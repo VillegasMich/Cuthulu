@@ -7,6 +7,7 @@ mod guard;
 mod healthcheck;
 mod logs;
 mod notify;
+mod rustdesk;
 mod services;
 mod system;
 mod tailscale;
@@ -41,6 +42,8 @@ pub fn router() -> Router<AppState> {
         .route("/system", get(system::snapshot))
         .route("/system/stream", get(system::stream))
         .route("/tailscale", get(tailscale::link))
+        .route("/rustdesk", get(rustdesk::status))
+        .route("/rustdesk/password", post(rustdesk::set_password))
         .route("/version", get(version::get))
 }
 

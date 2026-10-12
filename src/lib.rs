@@ -11,6 +11,7 @@ pub mod model;
 pub mod notify;
 pub mod providers;
 pub mod registry;
+pub mod rustdesk;
 pub mod server;
 pub mod system;
 pub mod tailscale;

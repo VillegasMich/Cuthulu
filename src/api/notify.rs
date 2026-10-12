@@ -142,6 +142,7 @@ mod tests {
                 None,
                 std::path::Path::new("/nonexistent/cuthulu"),
             )),
+            rustdesk: Arc::new(crate::rustdesk::tests::disabled()),
             config: Arc::new(config),
             shutdown,
         });

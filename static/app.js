@@ -1807,6 +1807,290 @@ async function initTailscale() {
   }
 }
 
+// ── rustdesk ───────────────────────────────────────────────
+
+const RUSTDESK_WEB = "https://rustdesk.com/web/";
+// How long the deep link gets to hand over to an installed app.
+const RUSTDESK_APP_WAIT = 1500;
+// Panel state. `result` (the new password) lives only while the panel is
+// open; closing it forgets the password for good.
+const rustdesk = { data: null, sudo: false, busy: false, error: "", result: null, note: "" };
+
+/** Copies `input`'s value; without a secure context, selects it for ctrl+c. */
+async function copyValue(input, status) {
+  input.focus();
+  input.select();
+  let ok = false;
+  if (navigator.clipboard && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(input.value);
+      ok = true;
+    } catch (_) {
+      /* fall through to the selection */
+    }
+  }
+  if (!ok) {
+    try {
+      ok = document.execCommand("copy");
+    } catch (_) {
+      ok = false;
+    }
+  }
+  status.textContent = ok ? "copied" : "selected · press ctrl+c";
+}
+
+/** A read-only value with a copy button and a status line for it. */
+function copyField(value, label, key) {
+  const input = el("input", { class: "input rd-val", readonly: true, value, "aria-label": label, spellcheck: "false", "data-k": `${key}-val` });
+  const status = el("span", { class: "muted rd-copied", role: "status" });
+  const copy = el("button", { class: "btn", type: "button", "data-k": `${key}-copy`, onclick: () => copyValue(input, status) }, "copy");
+  return el("span", { class: "rd-field" }, input, copy, status);
+}
+
+function rustdeskButtonLabel(d) {
+  if (!d) return "rustdesk: status unavailable";
+  if (!d.available) return "rustdesk not found on this host";
+  return d.id ? `rustdesk: ${d.id}` : "rustdesk: id unknown";
+}
+
+function drawRustDeskButton() {
+  const b = $("#rustdesk");
+  const label = rustdeskButtonLabel(rustdesk.data);
+  b.disabled = !rustdesk.data?.available;
+  b.title = label;
+  b.setAttribute("aria-label", label);
+  if (b.disabled) closeRustDesk();
+}
+
+async function loadRustDesk() {
+  try {
+    const res = await fetch("/api/rustdesk");
+    rustdesk.data = res.ok ? await res.json() : null;
+  } catch (_) {
+    rustdesk.data = null;
+  }
+  drawRustDeskButton();
+  if (!$("#rustdesk-panel").hidden) drawRustDeskPanel();
+}
+
+const validRustDeskId = (id) => typeof id === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(id);
+
+/**
+ * Opens this machine in the viewer's RustDesk app through its deep link. If
+ * the page still has focus after RUSTDESK_APP_WAIT (no app took over), opens
+ * the web client instead.
+ */
+function openRustDesk(id) {
+  let left = false;
+  const gone = () => (left = true);
+  const onVisibility = () => document.hidden && gone();
+  window.addEventListener("blur", gone);
+  window.addEventListener("pagehide", gone);
+  document.addEventListener("visibilitychange", onVisibility);
+  location.href = `rustdesk://connection/new/${encodeURIComponent(id)}`;
+  setTimeout(() => {
+    window.removeEventListener("blur", gone);
+    window.removeEventListener("pagehide", gone);
+    document.removeEventListener("visibilitychange", onVisibility);
+    if (left || document.hidden) return;
+    window.open(RUSTDESK_WEB, "_blank", "noopener,noreferrer");
+    rustdesk.note = "no rustdesk app answered; opened the web client";
+    if (!$("#rustdesk-panel").hidden) drawRustDeskPanel();
+  }, RUSTDESK_APP_WAIT);
+}
+
+async function setRustDeskPassword(input) {
+  const password = input.value;
+  if (!password) {
+    rustdesk.error = "enter the sudo password";
+    drawRustDeskPanel();
+    return;
+  }
+  rustdesk.busy = true;
+  rustdesk.error = "";
+  drawRustDeskPanel();
+  try {
+    const data = await notifyRequest("/api/rustdesk/password", { password });
+    rustdesk.result = data.new_password;
+    rustdesk.sudo = false;
+  } catch (e) {
+    rustdesk.error = e.message;
+  } finally {
+    input.value = "";
+    rustdesk.busy = false;
+  }
+  drawRustDeskPanel();
+  loadRustDesk();
+}
+
+function drawRustDeskPanel() {
+  const panel = $("#rustdesk-panel");
+  const d = rustdesk.data || {};
+  const id = validRustDeskId(d.id) ? d.id : null;
+  const pwState = d.password_set == null ? "unknown" : d.password_set ? "set" : "not set";
+
+  const newBtn = el(
+    "button",
+    {
+      class: "btn",
+      type: "button",
+      disabled: !d.can_set_password || rustdesk.busy,
+      title: d.can_set_password ? "set a new random permanent password (asks for the sudo password)" : d.reason,
+      "aria-expanded": String(rustdesk.sudo),
+      "data-k": "new",
+      onclick: () => {
+        rustdesk.sudo = !rustdesk.sudo;
+        rustdesk.error = "";
+        drawRustDeskPanel();
+        if (rustdesk.sudo) $("#rd-sudo")?.focus();
+      },
+    },
+    "new password",
+  );
+
+  let form = null;
+  if (rustdesk.sudo) {
+    // A redraw (fresh status) keeps what is being typed; it stays in the DOM only.
+    const typed = $("#rd-sudo")?.value ?? "";
+    const input = el("input", {
+      id: "rd-sudo",
+      "data-k": "sudo",
+      class: "input",
+      type: "password",
+      autocomplete: "current-password",
+      placeholder: "sudo password",
+      "aria-label": "sudo password of the host user",
+      disabled: rustdesk.busy,
+    });
+    input.value = typed;
+    form = el(
+      "form",
+      {
+        class: "rd-line",
+        onsubmit: (e) => {
+          e.preventDefault();
+          setRustDeskPassword(input);
+        },
+      },
+      input,
+      el("button", { class: "btn danger", type: "submit", disabled: rustdesk.busy, "data-k": "set" }, rustdesk.busy ? "setting…" : "set"),
+      el(
+        "button",
+        {
+          class: "btn",
+          type: "button",
+          disabled: rustdesk.busy,
+          "data-k": "cancel",
+          onclick: () => {
+            rustdesk.sudo = false;
+            rustdesk.error = "";
+            drawRustDeskPanel();
+          },
+        },
+        "cancel",
+      ),
+    );
+  }
+
+  const result = rustdesk.result
+    ? el(
+        "div",
+        { class: "rd-result" },
+        copyField(rustdesk.result, "new rustdesk password", "pw"),
+        el("p", { class: "muted" }, "new permanent password, shown once: copy it now; it is gone when this panel closes"),
+      )
+    : null;
+
+  const open = el(
+    "button",
+    {
+      class: "btn",
+      type: "button",
+      disabled: !id,
+      title: id ? "open in the rustdesk app on this device, else the web client" : "id unknown",
+      "data-k": "open",
+      onclick: () => id && openRustDesk(id),
+    },
+    "open",
+  );
+
+  // Redraws (a fresh status, a result) keep the focus on the same control.
+  const focused = panel.contains(document.activeElement) ? document.activeElement.dataset.k : null;
+  fill(
+    panel,
+    el("h2", {}, "rustdesk"),
+    el(
+      "dl",
+      { class: "kv rd-kv" },
+      el("dt", {}, "id"),
+      el("dd", {}, id ? copyField(id, "rustdesk id", "id") : el("span", { class: "muted" }, "unknown")),
+      el("dt", {}, "password"),
+      el("dd", {}, el("span", { class: d.password_set ? null : "muted" }, pwState), " ", newBtn),
+    ),
+    form,
+    rustdesk.error ? el("p", { class: "err", role: "alert" }, rustdesk.error) : null,
+    result,
+    el("div", { class: "rd-line" }, open, rustdesk.note ? el("span", { class: "muted" }, rustdesk.note) : null),
+  );
+  if (focused) panel.querySelector(`[data-k="${focused}"]`)?.focus();
+}
+
+/** The topbar button, or `more` on phones where the button is folded away. */
+const rustdeskAnchor = () => {
+  const b = $("#rustdesk");
+  return b.getClientRects().length ? b : $("#more");
+};
+
+function openRustDeskPanel() {
+  const panel = $("#rustdesk-panel");
+  const bar = $(".topbar").getBoundingClientRect();
+  const at = rustdeskAnchor().getBoundingClientRect();
+  panel.style.right = `${Math.max(8, bar.right - at.right)}px`;
+  rustdesk.note = "";
+  drawRustDeskPanel();
+  panel.hidden = false;
+  $("#rustdesk").setAttribute("aria-expanded", "true");
+  panel.querySelector("[data-k]:not(:disabled)")?.focus();
+  loadRustDesk();
+}
+
+function closeRustDesk(focusAnchor = false) {
+  const panel = $("#rustdesk-panel");
+  if (panel.hidden) return;
+  panel.hidden = true;
+  $("#rustdesk").setAttribute("aria-expanded", "false");
+  Object.assign(rustdesk, { sudo: false, error: "", result: null, note: "" });
+  panel.replaceChildren();
+  if (focusAnchor) rustdeskAnchor().focus();
+}
+
+/** RustDesk button: disabled unless RustDesk runs; opens the panel. */
+function initRustDesk() {
+  const button = $("#rustdesk");
+  const panel = $("#rustdesk-panel");
+  button.addEventListener("click", () => (panel.hidden ? openRustDeskPanel() : closeRustDesk()));
+  // Keys in the panel are the panel's (no row selection, no shortcuts).
+  panel.addEventListener("keydown", (e) => e.stopPropagation());
+  document.addEventListener("pointerdown", (e) => {
+    if (panel.hidden || panel.contains(e.target) || button.contains(e.target)) return;
+    if ($("#more-menu").contains(e.target)) return;
+    closeRustDesk();
+  });
+  // Capture, so Esc closes the panel before the page's own Esc (back) sees it.
+  window.addEventListener(
+    "keydown",
+    (e) => {
+      if (e.key !== "Escape" || panel.hidden) return;
+      e.preventDefault();
+      e.stopPropagation();
+      closeRustDesk(true);
+    },
+    true,
+  );
+  matchMedia("(max-width: 600px)").addEventListener("change", () => closeRustDesk());
+  loadRustDesk();
+}
+
 // ── healthcheck ────────────────────────────────────────────
 
 // Cheap single endpoint; the last ping only changes every few minutes.
@@ -1873,14 +2157,14 @@ function initHealthcheck() {
 // ── topbar "more" menu (phones) ────────────────────────────
 
 /**
- * Phones fold the topbar's notifications / healthchecks.io / tailscale /
- * github buttons into a `more` menu. Items are built on open from the
+ * Phones fold the topbar's notifications / healthchecks.io / rustdesk /
+ * tailscale / github buttons into a `more` menu. Items are built on open from the
  * buttons themselves, so only those currently shown are listed.
  */
 function initMore() {
   const button = $("#more");
   const menu = $("#more-menu");
-  const items = () => [...menu.querySelectorAll("[role=menuitem]")];
+  const items = () => [...menu.querySelectorAll("[role=menuitem]:not(:disabled)")];
 
   function close(focusButton = false) {
     if (menu.hidden) return;
@@ -1892,7 +2176,7 @@ function initMore() {
   function item(source, text) {
     if (source.hidden) return null;
     const bad = source.classList.contains("bad");
-    const common = { role: "menuitem", title: source.title, tabindex: "-1" };
+    const common = { role: "menuitem", title: source.title, tabindex: "-1", disabled: source.disabled };
     if (source instanceof HTMLAnchorElement) {
       return el(
         "a",
@@ -1928,6 +2212,7 @@ function initMore() {
       ro ? el("div", { class: "menu-note", title: ro.title }, "read-only") : null,
       item($("#notify"), "notifications"),
       item($("#healthcheck"), "healthchecks.io"),
+      item($("#rustdesk"), "rustdesk"),
       item($("#tailscale"), "tailscale"),
       item($("#github"), "github"),
     );
@@ -1974,6 +2259,7 @@ $("#theme").addEventListener("click", toggleTheme);
 initBack();
 initNotify();
 initTailscale();
+initRustDesk();
 initHealthcheck();
 initMore();
 document.addEventListener("keydown", (e) => {

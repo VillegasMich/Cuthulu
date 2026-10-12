@@ -16,6 +16,7 @@ this file in the same change when a decision moves.
                           ├── system    : host CPU/memory/network/disk ──▶ procfs (read-only)
                           └── notify    : alerts, heartbeat ──▶ SMTP, healthcheck URL (outbound only)
                           └── tailscale : admin console link ──unix socket──▶ tailscaled LocalAPI (GET status only)
+                          └── rustdesk  : ID, password reset ──▶ procfs (is it running) + host helper (rustdesk CLI)
 ```
 
 One process, one binary, no database. Docker is the source of truth; the
@@ -91,6 +92,7 @@ src/
     heartbeat.rs       healthcheck pings (ureq), latest attempt for the topbar, error redaction
     store.rs           watched services + global switch: notify.json, atomic writes
   tailscale.rs         tailscaled LocalAPI status → admin console link (cached, on demand)
+  rustdesk.rs          RustDesk on the host: running (procfs), ID + password state (host script, cached), password reset
   hosts.rs             allowed Host names (DNS-rebinding protection), CUTHULU_ALLOWED_HOSTS
   api/
     mod.rs             /api router
@@ -104,6 +106,7 @@ src/
     envedit.rs         env file editor: load / save (password-gated)
     healthcheck.rs     heartbeat status + dashboard link for the topbar
     tailscale.rs       link to this machine in the Tailscale admin console
+    rustdesk.rs        RustDesk ID / password state, password reset (password-gated)
     version.rs         running build (version, commit)
     error.rs           ApiError → JSON { error, code }
   providers/
@@ -226,6 +229,8 @@ services.
 | POST   | `/api/notify/test`                 | Send a test email and one ping now; `{email, healthcheck}` each `{status: sent\|off\|failed, error?}` |
 | GET    | `/api/healthcheck`                 | `{available, url, state: ok\|failed\|skipped\|pending\|off, last_ping_at, error}` for the topbar's healthchecks.io link; `url` is the dashboard, never the ping URL; always 200 |
 | GET    | `/api/tailscale`                   | `{available, url, tailnet, host, ip}` for the topbar's Tailscale admin link; always 200 |
+| GET    | `/api/rustdesk`                    | `{available, id, password_set, can_set_password, reason}` for the topbar's RustDesk panel; always 200 |
+| POST   | `/api/rustdesk/password`           | Body `{"password"}` (the host user's sudo password); sets a new random RustDesk permanent password and returns it once, `{new_password}` (`Cache-Control: no-store`). Wrong password `401`, limited `429`, read-only `403`, not possible here (no RustDesk, no `CUTHULU_HOST_USER`) `409`, helper problems `503`, RustDesk refused `500` |
 | GET    | `/api/version`                     | `{"version": "0.1.0", "git_sha": "<full sha>" \| null}` |
 
 Errors: JSON `{ "error": "...", "code": "bad_request|unauthorized|forbidden|not_found|conflict|too_many_requests|unavailable|internal" }`
@@ -528,6 +533,60 @@ panel it is **not** a `Provider`: Tailscale is not a service source.
 > (`fetch('/api/tailscale')` after load) rather than rendered into the page
 > shell, so a slow or missing tailscaled never delays a page.
 
+## RustDesk
+
+A topbar button shows this machine's RustDesk ID, whether a permanent
+password is set, sets a new one, and opens the viewer's RustDesk app on this
+ID. Like Tailscale it is **not** a `Provider`: RustDesk is not a service
+source.
+
+- **Running?** A process whose `comm` is `rustdesk` under
+  `CUTHULU_PROC_DIR` (the host's procfs in the container). No privilege, no
+  helper. Not running → `available: false`, the button is disabled and
+  nothing else is asked.
+- **ID and password state:** one fixed script through `HostControl` (the
+  host helper container, as root on the host, no password):
+  `rustdesk --get-id`, and an `awk` test of the top-level `password` key in
+  `/root/.config/rustdesk/RustDesk.toml` (the root service's config) that
+  prints only `password yes|no` — the hash never leaves the host. The ID is
+  accepted only as `[A-Za-z0-9_-]{1,64}`, else it is unknown. The config's
+  `enc_id` is never decrypted.
+- **Cost:** on demand — each page asks once on load and again when the
+  panel opens — and cached for 60 s, failures included; concurrent requests
+  share one lookup. A helper container therefore starts at most once a
+  minute, and only while pages are being opened.
+- **New password:** `POST /api/rustdesk/password` with the host user's sudo
+  password. The checks and limits are the env editor's: POST + same-origin,
+  `403` in read-only mode, `CUTHULU_HOST_USER` required, the sudo check
+  `runuser -u <user> -- sudo -S -k -v -p ''` (exit 12 → `401`, or `403`
+  when the user may not use sudo), and the *same* wrong-password limiter
+  (five in five minutes across both features → `429`). The server then
+  draws 16 characters from `/dev/urandom` over 56 unambiguous letters and
+  digits (no `0 O o 1 l I`, about 93 bits), and the script runs
+  `rustdesk --password <new>` as root, which must print `Done!`. Both the
+  sudo password and the new one travel on the helper's stdin (one line
+  each) into shell variables; the sudo password reaches sudo through
+  `printf` (a shell builtin). RustDesk's CLI only takes the new password as
+  an argument, so it is visible in that process's command line on the host
+  for the second it runs. The response carries it once (`no-store`); the
+  GET cache is dropped so `password_set` is read again. Nothing is stored or
+  logged; an error message carries RustDesk's own output, scrubbed of the
+  new password.
+- **Open** is client-side only: the page navigates to
+  `rustdesk://connection/new/<id>` (the form RustDesk's `urlLinkToCmdArgs`
+  handles, old and new clients). If the page has not lost focus or been
+  hidden 1.5 s later — no app took over — it opens
+  `https://rustdesk.com/web/` in a new tab (`noopener,noreferrer`).
+  Nothing is launched on the host.
+
+> **Decision (2026-10):** RustDesk 1.5 stores the permanent password as a
+> salted hash (`password` + `salt`), and its temporary password lives only
+> in RustDesk's IPC, which refuses peers that are not RustDesk. Neither can
+> be shown, so Cuthulu sets a new random permanent password and shows it
+> once instead of revealing the current one. The ID is read without a sudo
+> prompt through the helper (`--get-id` as root returns the same ID as the
+> service, which runs as root).
+
 ## Env file editor
 
 Services from the companion catalog (`deploy/companions/*.conf`, embedded
@@ -584,9 +643,9 @@ start, writes stdin and half-closes it (`stdin_once`), and keeps at most
 256 KiB of stdout and the last 4 KiB of stderr. 30 s per probe/read, 90 s
 for a write + restart; on a timeout or error the container is force-removed.
 
-**Rate limit.** Five wrong passwords within five minutes (global, in memory)
-make every password-gated request return `429` with `Retry-After` until the
-oldest failure leaves the window.
+**Rate limit.** Five wrong passwords within five minutes (global, in memory,
+shared with the RustDesk password reset) make every password-gated request
+return `429` with `Retry-After` until the oldest failure leaves the window.
 
 **Errors** (shown in the dialog): wrong password `401`; limited `429`; read-only
 `403`; not a catalog service `404`; `CUTHULU_HOST_USER` unset, missing file,
@@ -775,6 +834,12 @@ to the host**. Therefore:
 - The image runs as a non-root user (65532) from `scratch`.
 - The host's `/proc` (and optionally `/etc/passwd`) are mounted read-only;
   the panel shows process command lines but never environments.
+- RustDesk: the ID and a yes/no password state are read through the
+  helper without a password; setting a new permanent password needs the
+  host user's sudo password (same checks and limiter as the env editor).
+  The new password is generated server-side, never taken from a request,
+  travels on stdin, is returned once with `no-store` and never stored or
+  logged.
 - The tailscaled socket (optional) is only used for `GET
   /localapi/v0/status`; `/api/tailscale` returns the admin URL, tailnet name,
   MagicDNS name and IPv4 of this node, nothing about keys or other peers.
