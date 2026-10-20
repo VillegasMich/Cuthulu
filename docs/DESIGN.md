@@ -361,9 +361,12 @@ in `localStorage` (`cuthulu.sys.open`), as is the process sort
     2 [||           9.5%]    3 [|||||||     40.1%]   Tasks 312, 1708 threads; 2 running
   Mem [||||||||||||||||||           5.8G/15.5G]      Up    3d 4h
   Swp [|                             0.1G/2.0G]      Net   wlp2s0  ↓ 526K/s  ↑  34K/s
-                                                     IP    192.168.1.57      local
-                                                           100.115.90.103    tailscale
+  Pwr [||||||||||||||||||||           10.9W/15W]      IP    192.168.1.57      local
+  Tmp [|||||||||||||||||||||||||           64°C]            100.115.90.103    tailscale
                                                      Disk  read 106K/s  write 819K/s
+                                                     Energy   190 Wh since start (19h 3m)
+                                                     Temp  nvme  46°  cpu  64°  gpu  63°
+                                                     Src   AC  GPU  17%  200MHz
 ```
 
 - **Meters are text**: `[`, pipes, spaces, the value right-aligned at the
@@ -378,13 +381,36 @@ in `localStorage` (`cuthulu.sys.open`), as is the process sort
   1-minute load number uses load ÷ cores at 70 / 100 %. Labels are `--key`
   (cyan, as in htop), brackets `--muted`.
 - CPU meters use enough columns to stay about four rows tall (2 columns for
-  ≤ 8 cores, up to 8); Mem/Swp span the CPU block's width. At 600px and
-  below one column.
+  ≤ 8 cores, up to 8); Mem/Swp/Pwr/Tmp span the CPU block's width. At 600px
+  and below one column.
+- **Pwr** (CPU package power, RAPL): `10.9W/15W`, the value over the full
+  scale, zones 70 / 90 % of the scale. The scale is the CPU's long-term
+  power limit when the kernel exposes it, else `CUTHULU_POWER_MAX_W`, else
+  the highest power seen since start. Tooltip: package watts, core watts if
+  known, and where the scale comes from. When RAPL cannot be read the meter
+  stays, empty, with the value `n/a` in `--muted`; its tooltip (also in
+  `aria-valuetext`) says why — no RAPL here / root-only, see
+  `scripts/install.sh` and docs/DEPLOYMENT.md / hidden by Docker, mount it.
+- **Tmp**: the hottest temperature sensor on a 0–100 °C scale, value `64°C`.
+  Zones `--warn` ≥ 70 °C and `--err` ≥ 85 °C; a sensor that reports its own
+  critical temperature uses crit − 20 / crit − 10 instead (an NVMe drive with
+  crit 85 °C turns yellow at 65 °C). Tooltip: the sensor's name, driver,
+  label and both thresholds. No temperature sensors → no Tmp meter.
 - Info column: a label / value list (`dt` in `--key`). Rates are padded
   to a fixed width so the line does not jitter; the network tooltip gives
   Mbit/s. `↓` / `↑` are plain text glyphs.
 - At 600px and below, info values wrap rather than widen the page (a long
   IPv6 address breaks inside its column; the kind label keeps its own).
+- Rows after `Disk`, each only when there is data: `Energy` (CPU package
+  energy since Cuthulu started — Wh below 1 kWh, then kWh with two decimals —
+  and the time it covers; only with RAPL), `Temp` (one value per friendly
+  name — `cpu`, `gpu`, `nvme`, `disk`, `acpi`, else the driver — its hottest
+  sensor, each colored by the Tmp zones; driver, label and crit of every
+  sensor in the tooltip), `Src` (`AC`, or `BAT 83% discharging 7.2W` on
+  battery, `AC  BAT 95% charging …` on a charging laptop; the battery level
+  is `--warn` ≤ 25 % and `--err` ≤ 10 % while discharging; then
+  `GPU 17% 200MHz` when the GPU reports load or clock). Numbers are padded
+  to fixed widths so the lines do not jitter.
 - Addresses: one per row, the default-route interface's first, each with a
   `--muted` kind label in an aligned column (`local`, `public`, `cgnat`,
   `tailscale`, `wireguard`, `zerotier`, `vpn`); the interface is in the

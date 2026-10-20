@@ -60,6 +60,8 @@ Each phase should end in something runnable. Tick items as they land.
 - [x] htop-style panel above the services table: per-core meters, info column, collapsible (`m`)
 - [x] Top processes by CPU / memory, opt-in via `CUTHULU_SYSTEM_PROCESSES`
 - [x] `CUTHULU_PROC_DIR`, `CUTHULU_SYSTEM_SECS`; compose mounts the host's `/proc` read-only
+- [x] CPU package power (RAPL) `Pwr` meter, energy since start (always-on light tick), `Tmp` meter, temperatures, power source and GPU rows (`src/system/sysfs.rs`, `energy.rs`)
+- [x] `install.sh` offers RAPL access (group `cuthulu-energy`, udev rule, compose override); `CUTHULU_POWERCAP_DIR`, `CUTHULU_POWER_MAX_W`
 
 ## Notifications ✓
 - [x] Healthcheck heartbeat (`CUTHULU_HEALTHCHECK_URL`, e.g. healthchecks.io)
