@@ -930,7 +930,7 @@ const METER_GAP = 2; // ch between meter columns
  * it falls in (ok below `warn`%, warn below `err`%, err above), so a fuller
  * bar runs green → yellow → red.
  */
-function meter(label, pct, text, width, [warn, err]) {
+function meter(label, pct, text, width, [warn, err], { title, muted } = {}) {
   const p = Math.max(0, Math.min(100, pct));
   // Reserve room for the widest value ("100.0%") plus a space, so the bar's
   // scale does not shift as the number changes width.
@@ -952,15 +952,122 @@ function meter(label, pct, text, width, [warn, err]) {
       "aria-valuemin": "0",
       "aria-valuemax": "100",
       "aria-valuenow": String(Math.round(p)),
-      "aria-valuetext": text,
+      "aria-valuetext": muted && title ? `${text}: ${title}` : text.trim(),
+      title,
     },
     el("span", { class: "lbl" }, label),
     el("span", { class: "br" }, "["),
     ...segs.map((g) => el("span", { class: `fill ${g.z}` }, "|".repeat(g.n))),
     " ".repeat(width - pipes - text.length),
-    el("span", { class: "val" }, text),
+    el("span", { class: muted ? "val na" : "val" }, text),
     el("span", { class: "br" }, "]"),
   );
+}
+
+// Why the Pwr meter has no value, by `power.status` (see docs/DEPLOYMENT.md).
+const POWER_NA = {
+  absent: "no RAPL energy counters on this machine (or its kernel module is not loaded)",
+  denied:
+    "the RAPL energy counters are root-only; scripts/install.sh can let Cuthulu read them, see docs/DEPLOYMENT.md",
+  masked:
+    "Docker hides the RAPL energy counters; mount /sys/devices/virtual/powercap (scripts/install.sh does), see docs/DEPLOYMENT.md",
+  ok: "measuring…",
+};
+const POWER_SCALE = {
+  rapl: "the CPU's long-term power limit (RAPL PL1)",
+  config: "CUTHULU_POWER_MAX_W",
+  peak: "the highest power seen since Cuthulu started",
+};
+
+/** `Pwr [|||||      10.9W/15W]`, or a muted `n/a` saying why. */
+function powerMeter(p, width) {
+  if (p.watts == null) {
+    return meter("Pwr ", 0, "n/a", width, [70, 90], { title: `CPU power: ${POWER_NA[p.status] || p.status}`, muted: true });
+  }
+  const scale = p.scale_watts || p.watts;
+  const tip = [`CPU package ${p.watts.toFixed(1)} W`];
+  if (p.core_watts != null) tip.push(`cores ${p.core_watts.toFixed(1)} W`);
+  tip.push(`scale ${fmtWatts(scale)}W: ${POWER_SCALE[p.scale] || "current power"}`);
+  const text = `${p.watts.toFixed(1).padStart(4)}W/${fmtWatts(scale)}W`;
+  const pct = scale > 0 ? (p.watts / scale) * 100 : 0;
+  return meter("Pwr ", pct, text, width, [70, 90], { title: tip.join("\n") });
+}
+
+/** 15, 6.5: whole watts unless the value has a fraction worth showing. */
+const fmtWatts = (w) => (Number.isInteger(Math.round(w * 10) / 10) ? String(Math.round(w)) : w.toFixed(1));
+
+/** Warn / err thresholds (°C) of a sensor: 20 / 10 below its crit, else 70 / 85. */
+const tempLevels = (t) => (t.crit != null ? [t.crit - 20, t.crit - 10] : [70, 85]);
+
+/** "k10temp Tctl 63.9°C, crit 100°C". */
+const tempTip = (t) =>
+  `${t.driver}${t.label ? ` ${t.label}` : ""} ${t.celsius.toFixed(1)}°C` + (t.crit != null ? `, crit ${Math.round(t.crit)}°C` : "");
+
+/** `Tmp [||||||||     64°C]`: the hottest sensor, on a 0–100 °C scale. */
+function tempMeter(temps, width) {
+  if (!temps?.length) return null;
+  const hot = temps.reduce((a, b) => (b.celsius > a.celsius ? b : a));
+  const [warn, err] = tempLevels(hot);
+  const text = `${Math.round(hot.celsius)}°C`.padStart(5);
+  return meter("Tmp ", hot.celsius, text, width, [warn, err], {
+    title: `hottest: ${hot.name} (${tempTip(hot)}); warn ≥ ${Math.round(warn)}°C, err ≥ ${Math.round(err)}°C`,
+  });
+}
+
+/** Energy, padded: "  12.3 Wh", " 210 Wh", "1.23 kWh". */
+function fmtEnergy(wh) {
+  if (wh >= 1000) return `${(wh / 1000).toFixed(2)} kWh`;
+  return `${wh < 10 ? wh.toFixed(2) : wh < 100 ? wh.toFixed(1) : Math.round(wh)} Wh`.padStart(8);
+}
+
+/** `cpu  64°  gpu  63°`: one value per sensor name (its hottest), zone-colored. */
+function tempRow(temps) {
+  const byName = new Map();
+  for (const t of temps) {
+    const all = byName.get(t.name) || [];
+    all.push(t);
+    byName.set(t.name, all);
+  }
+  return [...byName].flatMap(([name, all], i) => {
+    const hot = all.reduce((a, b) => (b.celsius > a.celsius ? b : a));
+    const [warn, err] = tempLevels(hot);
+    return [
+      i ? "  " : "",
+      el(
+        "span",
+        { class: `lv-${level(hot.celsius, warn, err)}`, title: all.map(tempTip).join("\n") },
+        `${name} ${String(Math.round(hot.celsius)).padStart(3)}°`,
+      ),
+    ];
+  });
+}
+
+/** `AC  GPU  17%  200MHz`, `BAT 83% discharging 7.2W`. */
+function sourceRow(supply, gpu) {
+  const parts = [];
+  if (supply) {
+    const b = supply.battery;
+    if (supply.source === "ac") parts.push(el("span", { title: "on mains power" }, "AC"));
+    if (b) {
+      const bits = ["BAT"];
+      if (b.capacity != null) bits.push(`${String(b.capacity).padStart(3)}%`);
+      bits.push(b.status);
+      if (b.watts != null && b.status !== "full") bits.push(`${b.watts.toFixed(1)}W`);
+      const low = supply.source === "battery" && b.capacity != null ? `lv-${b.capacity <= 10 ? "err" : b.capacity <= 25 ? "warn" : "ok"}` : null;
+      parts.push(el("span", { class: low, title: `battery ${b.status}` }, bits.join(" ")));
+    }
+  }
+  if (gpu) {
+    const bits = ["GPU"];
+    if (gpu.busy != null) bits.push(`${String(gpu.busy).padStart(3)}%`);
+    if (gpu.mhz != null) bits.push(`${String(gpu.mhz).padStart(4)}MHz`);
+    const tip = [`${gpu.driver}`];
+    if (gpu.busy != null) tip.push(`busy ${gpu.busy}%`);
+    if (gpu.mhz != null) tip.push(`shader clock ${gpu.mhz} MHz`);
+    if (gpu.watts != null) tip.push(`${gpu.watts.toFixed(1)} W`);
+    parts.push(el("span", { title: tip.join(", ") }, bits.join(" ")));
+  }
+  return parts.flatMap((p, i) => (i ? ["  ", p] : [p]));
 }
 
 function initSystem() {
@@ -999,7 +1106,13 @@ function initSystem() {
       const pct = u.total ? (u.used / u.total) * 100 : 0;
       return meter(label, pct, `${fmtBytes(u.used)}/${fmtBytes(u.total)}`, wide, [warn, err]);
     };
-    fill($("#sys-mem"), usage("Mem ", s.mem, 75, 90), usage("Swp ", s.swap, 50, 80));
+    fill(
+      $("#sys-mem"),
+      usage("Mem ", s.mem, 75, 90),
+      usage("Swp ", s.swap, 50, 80),
+      s.power ? powerMeter(s.power, wide) : null,
+      tempMeter(s.temps, wide),
+    );
 
     const ncpu = n || 1;
     const rows = [
@@ -1029,6 +1142,19 @@ function initSystem() {
     if (s.disk) {
       rows.push(["Disk", [`read ${fmtRate(s.disk.read)}  write ${fmtRate(s.disk.write)}`]]);
     }
+    const p = s.power;
+    if (p?.energy_wh != null) {
+      rows.push(["Energy", [
+        el(
+          "span",
+          { title: "CPU package energy (RAPL) since Cuthulu started; kept in memory only" },
+          `${fmtEnergy(p.energy_wh)} since start (${fmtDur(p.energy_secs * 1000)})`,
+        ),
+      ]]);
+    }
+    if (s.temps?.length) rows.push(["Temp", tempRow(s.temps)]);
+    const src = sourceRow(s.supply, s.gpu);
+    if (src.length) rows.push(["Src", src]);
     fill($("#sys-info"), ...rows.flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, ...v)]));
 
     $("#sys-procs-box").hidden = !s.procs;

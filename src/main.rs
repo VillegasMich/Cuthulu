@@ -131,6 +131,7 @@ async fn run(env: &EnvFile) -> anyhow::Result<()> {
     );
 
     let system = SystemMonitor::new(&config, shutdown.clone());
+    tasks.extend(system.spawn_energy());
     let tailscale = Arc::new(Tailscale::new(&config));
     let app = server::router(AppState {
         registry,

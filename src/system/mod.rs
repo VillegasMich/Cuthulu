@@ -1,13 +1,19 @@
 //! Host system stats read from `/proc`: CPU, memory, load, network,
-//! disk I/O and (opt-in) the busiest processes.
+//! disk I/O and (opt-in) the busiest processes; and from `/sys`: CPU
+//! package power (RAPL), temperatures, the power source and the GPU.
 //!
 //! This is not a [`Provider`](crate::providers::Provider): the host is not a
 //! service source. One shared sampler runs only while at least one client is
 //! subscribed and stops on its own when the last one leaves, so nobody
 //! watching costs nothing. Results go out on a small bounded broadcast;
 //! every update is a full snapshot, so a lagging subscriber just skips some.
+//! The one exception is the energy tick ([`SystemMonitor::spawn_energy`]):
+//! the energy total needs every RAPL counter wrap seen, so while RAPL is
+//! readable it reads the counters about once a minute regardless.
 
+pub mod energy;
 pub mod proc;
+pub mod sysfs;
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -17,10 +23,13 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tokio::sync::broadcast;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
+use self::energy::{Energy, Power};
 use self::proc::{LoadAvg, MemInfo, PidStat, PidStatus, Route, Stat, ratio};
+use self::sysfs::{Gpu, RaplStatus, Supply, Temp};
 use crate::config::Config;
 
 /// Processes listed per sort key. The snapshot carries the union of the top
@@ -35,6 +44,7 @@ const CAPACITY: usize = 4;
 /// Gap between the two reads of a one-off sample (rates need a delta).
 const BASELINE: Duration = Duration::from_millis(250);
 const PASSWD: &str = "/etc/passwd";
+const SYS: &str = "/sys";
 /// Interfaces that are container or VM plumbing, not the host's own links.
 const VIRTUAL_IFACES: [&str; 9] = [
     "lo", "docker", "br-", "veth", "virbr", "cni", "flannel", "cali", "vxlan",
@@ -78,6 +88,17 @@ pub struct Snapshot {
     /// [`TOP`] by CPU and by memory, highest CPU first.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub procs: Option<Vec<Process>>,
+    /// CPU package power and energy; `status` says why watts are missing.
+    pub power: Power,
+    /// hwmon temperatures; absent when the machine has none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub temps: Vec<Temp>,
+    /// Power source; absent without an adapter or system battery.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supply: Option<Supply>,
+    /// GPU load and clock; absent when no driver reports them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<Gpu>,
 }
 
 /// Bytes.
@@ -185,6 +206,9 @@ pub struct SystemMonitor {
     /// `sys/kernel/hostname` answers for the *reader's* UTS namespace, so
     /// inside a container it is the container's name, not the host's.
     read_hostname: bool,
+    /// sysfs root for temperatures, power supplies and the GPU.
+    sys_dir: PathBuf,
+    energy: Energy,
     tx: broadcast::Sender<Update>,
     state: Mutex<State>,
     /// Previous raw read, the baseline for the next delta.
@@ -195,6 +219,12 @@ pub struct SystemMonitor {
 impl SystemMonitor {
     #[must_use]
     pub fn new(config: &Config, shutdown: CancellationToken) -> Arc<Self> {
+        Self::with_sys(config, Path::new(SYS), shutdown)
+    }
+
+    /// Like [`new`](Self::new), with sysfs at `sys` (tests use a temp dir).
+    #[must_use]
+    pub(crate) fn with_sys(config: &Config, sys: &Path, shutdown: CancellationToken) -> Arc<Self> {
         let processes = config.system_processes;
         // Optional: in the container the host's file is mounted read-only;
         // without it users are shown by uid.
@@ -211,6 +241,8 @@ impl SystemMonitor {
             processes,
             users,
             read_hostname: !Path::new("/.dockerenv").exists(),
+            sys_dir: sys.to_owned(),
+            energy: Energy::probe(&config.powercap_dir, sys, config.power_max_w.map(f64::from)),
             tx: broadcast::channel(CAPACITY).0,
             state: Mutex::default(),
             prev: Mutex::default(),
@@ -256,6 +288,44 @@ impl SystemMonitor {
         let update = self.sample().await;
         self.state().latest = Some((Instant::now(), update.clone()));
         update
+    }
+
+    /// Starts the always-on energy tick, which keeps the energy total
+    /// counting while nobody watches: one read of the RAPL counters every
+    /// [`energy::MAX_TICK`], or often enough to see every counter wrap.
+    /// `None` (no task at all) when RAPL is not readable. Stops on shutdown.
+    pub fn spawn_energy(self: &Arc<Self>) -> Option<JoinHandle<()>> {
+        let status = self.energy.status();
+        if status != RaplStatus::Ok {
+            info!(
+                ?status,
+                "CPU power (RAPL) unavailable; see docs/DEPLOYMENT.md"
+            );
+            return None;
+        }
+        info!("CPU power (RAPL) readable; counting energy");
+        Some(tokio::spawn(Arc::clone(self).energy_tick()))
+    }
+
+    async fn energy_tick(self: Arc<Self>) {
+        let mut failing = false;
+        loop {
+            let this = Arc::clone(&self);
+            let res = tokio::task::spawn_blocking(move || this.energy.read())
+                .await
+                .map_err(|e| SystemError::Task(e.to_string()))
+                .and_then(|r| r.map_err(|e| io_err(Path::new("energy_uj"), &e)));
+            match &res {
+                Err(e) if !failing => warn!(error = %e, "cannot read the RAPL energy counters"),
+                Ok(()) if failing => debug!("RAPL energy counters readable again"),
+                _ => {}
+            }
+            failing = res.is_err();
+            tokio::select! {
+                () = tokio::time::sleep(self.energy.tick_interval()) => {}
+                () = self.shutdown.cancelled() => return,
+            }
+        }
     }
 
     async fn run(self: Arc<Self>) {
@@ -313,12 +383,20 @@ impl SystemMonitor {
             .map(|h| h.trim().to_owned())
             .filter(|h| !h.is_empty());
 
+        if let Err(e) = self.energy.read() {
+            debug!(error = %e, "cannot read the RAPL energy counters");
+        }
+        let (temps, gpu) = sysfs::read_hwmon(&self.sys_dir);
         let host = Host {
             hostname,
             mem,
             load,
             uptime,
             addrs: self.addresses(),
+            power: self.energy.power(),
+            temps,
+            supply: sysfs::read_supply(&self.sys_dir),
+            gpu,
         };
         let mut snap = build(&base, &now, host);
         if self.processes {
@@ -513,6 +591,10 @@ struct Host {
     load: LoadAvg,
     uptime: u64,
     addrs: Option<Addrs>,
+    power: Power,
+    temps: Vec<Temp>,
+    supply: Option<Supply>,
+    gpu: Option<Gpu>,
 }
 
 /// Bytes per second between two counter readings.
@@ -594,6 +676,10 @@ fn build(prev: &Raw, now: &Raw, host: Host) -> Snapshot {
         net,
         disk,
         procs: None,
+        power: host.power,
+        temps: host.temps,
+        supply: host.supply,
+        gpu: host.gpu,
     }
 }
 
@@ -790,9 +876,10 @@ pub(crate) mod tests {
             proc_dir: dir.to_owned(),
             system_interval: Duration::from_millis(ms),
             system_processes: processes,
+            powercap_dir: dir.join("sys/class/powercap"),
             ..Config::default()
         };
-        SystemMonitor::new(&config, shutdown)
+        SystemMonitor::with_sys(&config, &dir.join("sys"), shutdown)
     }
 
     impl Drop for FakeProc {
@@ -841,6 +928,11 @@ pub(crate) mod tests {
             load: LoadAvg::default(),
             uptime: 0,
             addrs: None,
+            power: Energy::probe(Path::new("/nonexistent"), Path::new("/nonexistent"), None)
+                .power(),
+            temps: Vec::new(),
+            supply: None,
+            gpu: None,
         }
     }
 
@@ -1179,6 +1271,65 @@ pub(crate) mod tests {
         let mut c = mon.subscribe();
         assert!(mon.is_sampling());
         c.recv().await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn energy_tick_counts_without_watchers_and_stops_on_shutdown() {
+        let fake = FakeProc::new();
+        sysfs::tests::rapl(&fake, "sys/class/powercap", 1_000_000);
+        let token = CancellationToken::new();
+        let mon = monitor(&fake.0, 3_600_000, false, token.clone());
+        let tick = mon.spawn_energy().expect("RAPL readable: the tick runs");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while mon.energy.power().energy_secs.is_none() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the tick reads the counters with nobody subscribed");
+        assert!(!mon.is_sampling(), "and starts no host sampler");
+        token.cancel();
+        tokio::time::timeout(Duration::from_secs(5), tick)
+            .await
+            .expect("the tick stops on shutdown")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn no_energy_tick_without_readable_rapl() {
+        let fake = FakeProc::new();
+        let mon = monitor(&fake.0, 50, false, CancellationToken::new());
+        assert!(mon.spawn_energy().is_none());
+        let s = mon.snapshot().await.unwrap();
+        assert_eq!(s.power.status, RaplStatus::Absent);
+        assert_eq!(s.power.watts, None);
+    }
+
+    #[tokio::test]
+    async fn sampler_reports_watts_from_the_counters() {
+        let fake = FakeProc::new();
+        sysfs::tests::laptop(&fake);
+        let mon = monitor(&fake.0, 50, false, CancellationToken::new());
+        let mut rx = mon.subscribe();
+        rx.recv().await.unwrap().unwrap();
+        let mut energy = 1_000_000_u64;
+        let s = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                // Any increase between samples shows up as power.
+                energy += 5_000_000;
+                sysfs::tests::rapl(&fake, "sys/class/powercap", energy);
+                let s = rx.recv().await.unwrap().unwrap();
+                if s.power.watts.is_some_and(|w| w > 0.0) {
+                    break s;
+                }
+            }
+        })
+        .await
+        .expect("watts between samples");
+        assert_eq!(s.power.status, RaplStatus::Ok);
+        assert!(s.power.energy_wh.unwrap() > 0.0);
+        assert_eq!(s.temps.len(), 3);
+        assert!(s.gpu.is_some() && s.supply.is_some());
     }
 
     #[tokio::test]

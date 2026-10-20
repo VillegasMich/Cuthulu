@@ -1425,6 +1425,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn system_snapshot_with_power_and_sensors() {
+        let fake = crate::system::tests::FakeProc::new();
+        crate::system::sysfs::tests::laptop(&fake);
+        let (app, _) = app_with_proc(&fake.0);
+        let (status, _, body) = send(&app, get("/api/system")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let snap: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(snap["power"]["status"], "ok");
+        assert_eq!(snap["power"]["energy_wh"], 0.0);
+        let temps: Vec<(&str, f64)> = snap["temps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| (t["name"].as_str().unwrap(), t["celsius"].as_f64().unwrap()))
+            .collect();
+        assert_eq!(temps, [("nvme", 45.9), ("cpu", 63.9), ("gpu", 63.0)]);
+        assert_eq!(snap["temps"][0]["crit"], 85.85);
+        assert_eq!(snap["supply"], serde_json::json!({ "source": "ac" }));
+        assert_eq!(
+            snap["gpu"],
+            serde_json::json!({ "driver": "amdgpu", "busy": 17, "mhz": 200 })
+        );
+
+        // Without any of it: the status says why, the rest is left out.
+        let bare = crate::system::tests::FakeProc::new();
+        let (app, _) = app_with_proc(&bare.0);
+        let (_, _, body) = send(&app, get("/api/system")).await;
+        let snap: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(snap["power"], serde_json::json!({ "status": "absent" }));
+        for key in ["temps", "supply", "gpu"] {
+            assert!(snap.get(key).is_none(), "{key}: {snap}");
+        }
+    }
+
+    #[tokio::test]
     async fn system_unavailable_without_proc() {
         let (app, _) = app_with_proc(std::path::Path::new("/nonexistent/cuthulu"));
         let (status, _, body) = send(&app, get("/api/system")).await;

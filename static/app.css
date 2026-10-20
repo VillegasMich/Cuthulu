@@ -406,7 +406,7 @@ body[data-resizing="row"], body[data-resizing="row"] * { cursor: row-resize; }
 .sys-meters { flex: none; max-width: 100%; overflow-x: auto; }
 .meters { display: grid; gap: 0 2ch; white-space: pre; }
 .meter .lbl { color: var(--key); }
-.meter .br { color: var(--muted); }
+.meter .br, .meter .val.na { color: var(--muted); }
 .meter .fill.ok, .lv-ok { color: var(--ok); }
 .meter .fill.warn, .lv-warn { color: var(--warn); }
 .meter .fill.err, .lv-err { color: var(--err); }
