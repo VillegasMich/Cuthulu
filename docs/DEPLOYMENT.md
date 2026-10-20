@@ -437,8 +437,9 @@ What it shows:
 - **Power** is the package energy between two reads over the time between
   them, summed over CPU packages; the tooltip adds the cores' share when the
   CPU reports it. The meter's full scale is the CPU's long-term power limit
-  (PL1) when the kernel exposes it, else `CUTHULU_POWER_MAX_W`, else the
-  highest power seen since Cuthulu started.
+  (PL1) when the kernel exposes it, else `CUTHULU_POWER_MAX_W` (both color
+  the bar yellow / red at 70 / 90 %), else the highest power seen since
+  Cuthulu started, rounded up to 5 W and never colored as a warning.
 - **Energy** is counted since Cuthulu started, in memory only: a restart
   starts from zero. The counters wrap (about every 1–2 hours at full load
   on a laptop), so a light tick reads them once a minute, or more often if

@@ -24,6 +24,9 @@ const MIN_TICK: Duration = Duration::from_secs(1);
 /// right after another one (the tick and the sampler) does not give a noisy
 /// value.
 const MIN_WINDOW: Duration = Duration::from_millis(500);
+/// The highest-seen scale is rounded up to a multiple of this many watts,
+/// so the meter is not pinned at 100 % by the value that set it.
+pub const PEAK_STEP: f64 = 5.0;
 /// A delta implying more than this (per package) is a counter reset, e.g.
 /// after a resume, and is dropped rather than counted.
 const MAX_PLAUSIBLE_W: f64 = 5_000.0;
@@ -36,7 +39,8 @@ pub enum Scale {
     Rapl,
     /// `CUTHULU_POWER_MAX_W`.
     Config,
-    /// The highest power seen since Cuthulu started.
+    /// The highest power seen since Cuthulu started, rounded up to
+    /// [`PEAK_STEP`] watts. Not a limit, so the meter shows no alarm zones.
     Peak,
 }
 
@@ -245,12 +249,11 @@ impl Energy {
     #[must_use]
     pub fn power(&self) -> Power {
         let acc = self.acc();
-        let peak = (acc.peak() > 0.0).then(|| acc.peak());
-        let (scale_watts, scale) = match (self.limit, self.config_max, peak) {
-            (Some(w), _, _) => (Some(w), Some(Scale::Rapl)),
-            (None, Some(w), _) => (Some(w), Some(Scale::Config)),
-            (None, None, Some(w)) => (Some(w), Some(Scale::Peak)),
-            (None, None, None) => (None, None),
+        let (scale_watts, scale) = match (self.limit, self.config_max) {
+            (Some(w), _) => (Some(w), Some(Scale::Rapl)),
+            (None, Some(w)) => (Some(w), Some(Scale::Config)),
+            (None, None) if self.readable() => (Some(peak_scale(acc.peak())), Some(Scale::Peak)),
+            (None, None) => (None, None),
         };
         let energy = acc.energy();
         Power {
@@ -285,6 +288,17 @@ impl Energy {
 
     fn acc(&self) -> MutexGuard<'_, Accumulator> {
         self.acc.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// The highest-seen scale: `peak` rounded up to the next multiple of
+/// [`PEAK_STEP`], and at least one step (no reading yet: 5 W).
+#[must_use]
+pub fn peak_scale(peak: f64) -> f64 {
+    if peak.is_finite() && peak > 0.0 {
+        ((peak / PEAK_STEP).ceil() * PEAK_STEP).max(PEAK_STEP)
+    } else {
+        PEAK_STEP
     }
 }
 
@@ -396,6 +410,17 @@ mod tests {
     }
 
     #[test]
+    fn peak_scale_rounds_up_to_five_watts() {
+        assert_eq!(peak_scale(12.4), 15.0);
+        assert_eq!(peak_scale(15.0), 15.0, "already a multiple");
+        assert_eq!(peak_scale(15.01), 20.0);
+        assert_eq!(peak_scale(0.3), 5.0);
+        assert_eq!(peak_scale(0.0), 5.0, "no reading yet");
+        assert_eq!(peak_scale(f64::NAN), 5.0);
+        assert_eq!(peak_scale(97.0), 100.0);
+    }
+
+    #[test]
     fn tick_reads_twice_per_wrap() {
         assert_eq!(
             tick_interval(Some(MAX), 15.0),
@@ -441,10 +466,15 @@ mod tests {
 
         std::fs::remove_file(class.join("intel-rapl:0/constraint_0_name")).unwrap();
         let e = Energy::probe(&class, &sys, None);
+        assert_eq!(
+            (e.power().scale, e.power().scale_watts),
+            (Some(Scale::Peak), Some(5.0)),
+            "no reading yet"
+        );
         e.acc().peak = 12.34;
         assert_eq!(
             (e.power().scale, e.power().scale_watts),
-            (Some(Scale::Peak), Some(12.3))
+            (Some(Scale::Peak), Some(15.0))
         );
     }
 

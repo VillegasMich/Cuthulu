@@ -391,7 +391,10 @@ image.
     the first read after startup.
   - **Pwr scale:** the sum of the packages' PL1 limits when every package
     has one (`scale: rapl`), else `CUTHULU_POWER_MAX_W` (`config`), else the
-    highest watts seen since start (`peak`).
+    highest watts seen since start rounded up to the next multiple of 5 W,
+    at least 5 W (`peak`, `energy::peak_scale`; only while RAPL is `ok`).
+    The UI colors `rapl`/`config` by zone and never `peak`, which is no
+    limit.
 - **Energy tick:** while RAPL is `ok`, a task started from `main`
   (`SystemMonitor::spawn_energy`) reads the counters every 60 s, or every
   half wrap period at the highest power known (current, peak or PL1) when
@@ -849,7 +852,7 @@ context, so containers get their settings from Compose as before.
 | `CUTHULU_SYSTEM_SECS`    | `2`                            | Host panel sampling interval (1–60), only while someone watches |
 | `CUTHULU_SYSTEM_PROCESSES` | `false`                      | Also list the top processes (by CPU / memory) in the host panel |
 | `CUTHULU_POWERCAP_DIR`   | `/sys/class/powercap` (`install.sh` override: `/host/powercap`) | Where the RAPL energy counters are; in a container, the host's `/sys/devices/virtual/powercap` mounted read-only ([DEPLOYMENT.md](DEPLOYMENT.md#cpu-power-meter)) |
-| `CUTHULU_POWER_MAX_W`    | unset                          | Full scale of the host panel's `Pwr` meter in whole watts (1–10 000), used when the kernel exposes no RAPL power limit; unset = the highest power seen |
+| `CUTHULU_POWER_MAX_W`    | unset                          | Full scale of the host panel's `Pwr` meter in whole watts (1–10 000), used when the kernel exposes no RAPL power limit; unset = the highest power seen, rounded up to 5 W, without warn/err colors |
 | `CUTHULU_DATA_DIR`       | `./data` (image: `/data`)      | Directory for `todos.json`, `notify.json` and `stopped.json`; created on first write |
 | `CUTHULU_NOTIFY_ENABLED` | `true`                         | Master switch for email and healthcheck pings (`false` keeps the settings but sends nothing) |
 | `CUTHULU_SMTP_HOST`      | —                              | SMTP server; unset = no email |

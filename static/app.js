@@ -976,7 +976,7 @@ const POWER_NA = {
 const POWER_SCALE = {
   rapl: "the CPU's long-term power limit (RAPL PL1)",
   config: "CUTHULU_POWER_MAX_W",
-  peak: "the highest power seen since Cuthulu started",
+  peak: "the highest power seen since Cuthulu started, rounded up to 5 W (set CUTHULU_POWER_MAX_W to fix it)",
 };
 
 /** `Pwr [|||||      10.9W/15W]`, or a muted `n/a` saying why. */
@@ -990,7 +990,9 @@ function powerMeter(p, width) {
   tip.push(`scale ${fmtWatts(scale)}W: ${POWER_SCALE[p.scale] || "current power"}`);
   const text = `${p.watts.toFixed(1).padStart(4)}W/${fmtWatts(scale)}W`;
   const pct = scale > 0 ? (p.watts / scale) * 100 : 0;
-  return meter("Pwr ", pct, text, width, [70, 90], { title: tip.join("\n") });
+  // The highest seen is no limit: nothing to warn about, every pipe stays ok.
+  const zones = p.scale === "peak" ? [Infinity, Infinity] : [70, 90];
+  return meter("Pwr ", pct, text, width, zones, { title: tip.join("\n") });
 }
 
 /** 15, 6.5: whole watts unless the value has a fraction worth showing. */

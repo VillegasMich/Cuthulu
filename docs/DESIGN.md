@@ -384,10 +384,13 @@ in `localStorage` (`cuthulu.sys.open`), as is the process sort
   ≤ 8 cores, up to 8); Mem/Swp/Pwr/Tmp span the CPU block's width. At 600px
   and below one column.
 - **Pwr** (CPU package power, RAPL): `10.9W/15W`, the value over the full
-  scale, zones 70 / 90 % of the scale. The scale is the CPU's long-term
-  power limit when the kernel exposes it, else `CUTHULU_POWER_MAX_W`, else
-  the highest power seen since start. Tooltip: package watts, core watts if
-  known, and where the scale comes from. When RAPL cannot be read the meter
+  scale. The scale is the CPU's long-term power limit when the kernel
+  exposes it, else `CUTHULU_POWER_MAX_W` — both with zones 70 / 90 % of the
+  scale — else the highest power seen since start rounded up to the next
+  multiple of 5 W (12.4 → 15 W; 5 W before the first reading). That last
+  one is no limit, so it has no zones: every pipe stays `--ok`. Tooltip:
+  package watts, core watts if known, and where the scale comes from (for
+  the highest seen, how to set `CUTHULU_POWER_MAX_W`). When RAPL cannot be read the meter
   stays, empty, with the value `n/a` in `--muted`; its tooltip (also in
   `aria-valuetext`) says why — no RAPL here / root-only, see
   `scripts/install.sh` and docs/DEPLOYMENT.md / hidden by Docker, mount it.
