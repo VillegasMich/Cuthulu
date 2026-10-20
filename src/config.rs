@@ -14,6 +14,8 @@ use crate::hosts::AllowedHosts;
 pub const MAX_LOG_TAIL: usize = 10_000;
 /// Bounds for the host panel's sampling interval, in seconds.
 pub const SYSTEM_SECS: std::ops::RangeInclusive<u64> = 1..=60;
+/// Bounds for `CUTHULU_POWER_MAX_W`, in watts.
+pub const POWER_MAX_W: std::ops::RangeInclusive<u32> = 1..=10_000;
 /// Image of the host helper container used by the env editor: busybox has
 /// `nsenter`. Pinned by digest (the multi-arch `busybox:stable` index).
 pub const DEFAULT_HELPER_IMAGE: &str =
@@ -39,6 +41,12 @@ pub struct Config {
     pub system_interval: Duration,
     /// Also list the busiest processes in the host panel.
     pub system_processes: bool,
+    /// Where the RAPL energy counters are: `/sys/class/powercap`, or the
+    /// host's `/sys/devices/virtual/powercap` mounted into the container.
+    pub powercap_dir: PathBuf,
+    /// Full scale of the host panel's power meter, in watts, when the
+    /// kernel exposes no RAPL power limit.
+    pub power_max_w: Option<u32>,
     /// Directory for state Cuthulu owns (`todos.json`, `notify.json`).
     pub data_dir: PathBuf,
     /// Email and healthcheck settings (`CUTHULU_NOTIFY_*`, `CUTHULU_SMTP_*`,
@@ -74,6 +82,8 @@ impl Default for Config {
             proc_dir: PathBuf::from("/proc"),
             system_interval: Duration::from_secs(2),
             system_processes: false,
+            powercap_dir: PathBuf::from("/sys/class/powercap"),
+            power_max_w: None,
             data_dir: PathBuf::from("data"),
             notify: NotifyConfig::default(),
             tailscale_socket: Some(PathBuf::from("/var/run/tailscale/tailscaled.sock")),
@@ -164,6 +174,13 @@ impl Config {
                 d.system_processes,
                 parse_bool,
             )?,
+            powercap_dir: get("CUTHULU_POWERCAP_DIR").map_or(d.powercap_dir, PathBuf::from),
+            power_max_w: parse(
+                get("CUTHULU_POWER_MAX_W"),
+                "CUTHULU_POWER_MAX_W",
+                d.power_max_w,
+                parse_watts,
+            )?,
             data_dir: get("CUTHULU_DATA_DIR").map_or(d.data_dir, PathBuf::from),
             notify: parse_notify(&get)?,
             // Unlike the others, an empty value is meaningful here: it disables.
@@ -207,6 +224,18 @@ fn parse<T>(
             value: v,
             reason,
         }),
+    }
+}
+
+fn parse_watts(v: &str) -> Result<Option<u32>, String> {
+    match v.parse::<u32>() {
+        Ok(n) if POWER_MAX_W.contains(&n) => Ok(Some(n)),
+        Ok(_) => Err(format!(
+            "must be between {} and {}",
+            POWER_MAX_W.start(),
+            POWER_MAX_W.end()
+        )),
+        Err(e) => Err(format!("{e} (whole watts)")),
     }
 }
 
@@ -661,6 +690,23 @@ mod tests {
         assert!(from(&[("CUTHULU_SYSTEM_SECS", "0")]).is_err());
         assert!(from(&[("CUTHULU_SYSTEM_SECS", "61")]).is_err());
         assert!(from(&[("CUTHULU_SYSTEM_SECS", "x")]).is_err());
+    }
+
+    #[test]
+    fn power_settings() {
+        let d = Config::default();
+        assert_eq!(d.powercap_dir, PathBuf::from("/sys/class/powercap"));
+        assert_eq!(d.power_max_w, None);
+        let c = from(&[
+            ("CUTHULU_POWERCAP_DIR", "/host/powercap"),
+            ("CUTHULU_POWER_MAX_W", "65"),
+        ])
+        .unwrap();
+        assert_eq!(c.powercap_dir, PathBuf::from("/host/powercap"));
+        assert_eq!(c.power_max_w, Some(65));
+        for bad in ["0", "10001", "15.5", "-3", "lots"] {
+            assert!(from(&[("CUTHULU_POWER_MAX_W", bad)]).is_err(), "{bad}");
+        }
     }
 
     const SMTP: &[(&str, &str)] = &[

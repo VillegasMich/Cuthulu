@@ -24,8 +24,10 @@ start/stop/restart work. See the [roadmap](docs/ROADMAP.md).
 - Live log tailing with search and stderr highlighting
 - Start / stop / restart, with protection against stopping itself
 - htop-style host panel: per-core CPU, memory, swap, load, IP addresses,
-  network and disk throughput (optionally top processes), read straight from
-  `/proc` and sampled only while someone is watching
+  network and disk throughput (optionally top processes), temperatures,
+  power source and GPU load, read straight from `/proc` and `/sys` and
+  sampled only while someone is watching; opt-in CPU power and energy
+  (RAPL, `scripts/install.sh` asks)
 - Per-service TODO notes, kept in one JSON file (no database)
 - Notifications: email and desktop alerts when a watched service goes down
   (automatic for restart-policy and systemd services, bell per service for

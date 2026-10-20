@@ -29,6 +29,11 @@
 # Companions (deploy/companions/*.conf) are cloned to ~/.local/share/cuthulu/companions/<name>
 # and installed with their own scripts/install.sh and published image; picking an installed one
 # upgrades and restarts it. scripts/uninstall.sh leaves them alone.
+#
+# CPU power meter: on a machine with RAPL, a terminal is asked whether Cuthulu may read the CPU
+# energy counters (root-only by default). Yes adds the group cuthulu-energy, a udev rule letting
+# it read them and /etc/cuthulu/compose.override.yaml mounting them into the container; asked
+# once, undone by scripts/uninstall.sh. See docs/DEPLOYMENT.md#cpu-power-meter.
 set -euo pipefail
 
 readonly SERVICE=cuthulu
@@ -46,6 +51,11 @@ readonly HELPER_IMAGE=busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd
 readonly COMPANION_KEYS=(NAME DESCRIPTION REPO IMAGE CONTAINER UNIT UNIT_SCOPE ENV_FILE)
 # Width of the status column: the longest status, "not installed".
 readonly STATUS_WIDTH=13
+readonly ENERGY_GROUP=cuthulu-energy
+# Not readonly: the tests point these into a temp dir.
+ENERGY_RULE=/etc/udev/rules.d/70-cuthulu-energy.rules
+ENERGY_OVERRIDE=$INSTALL_DIR/compose.override.yaml
+POWERCAP=/sys/class/powercap
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 readonly ROOT
@@ -58,6 +68,8 @@ die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "'$1' is required but not installed${2:+ ($2)}"; }
 # A function, not a test of $EUID inline, so the tests can pretend to be root.
 is_root() { [[ $EUID -eq 0 ]]; }
+# Likewise for a terminal on stdin.
+is_terminal() { [[ -t 0 ]]; }
 
 # --- Companion catalog -----------------------------------------------------------------------
 # Suggestable entries in catalog order, and every entry's fields by NAME (including those with
@@ -344,6 +356,89 @@ companions_step() {
   return "$failed"
 }
 
+# --- CPU power meter (RAPL) ------------------------------------------------------------------
+# The kernel makes the RAPL energy counters root-only (CVE-2020-8694). A udev rule rather than a
+# systemd-tmpfiles line: it re-applies whenever the zones appear (boot, module reload), while
+# tmpfiles runs once at boot and misses a module loaded later.
+energy_rule() {
+  cat <<EOF
+# Written by Cuthulu's scripts/install.sh; scripts/uninstall.sh removes it. Lets the group
+# $ENERGY_GROUP read the RAPL energy counters for the dashboard's CPU power meter.
+ACTION=="add|change", SUBSYSTEM=="powercap", KERNEL=="intel-rapl:*", \\
+  RUN+="/bin/chgrp $ENERGY_GROUP /sys%p/energy_uj", RUN+="/bin/chmod g+r /sys%p/energy_uj"
+EOF
+}
+
+# Compose reads compose.override.yaml next to compose.yaml on its own. $1: the group's gid.
+energy_override() {
+  cat <<EOF
+# Written by scripts/install.sh (CPU power meter enabled); scripts/uninstall.sh removes it.
+# Docker hides /sys/devices/virtual/powercap in containers: mount it read-only elsewhere and
+# join the group that may read its energy counters. See docs/DEPLOYMENT.md#cpu-power-meter.
+services:
+  cuthulu:
+    volumes:
+      - /sys/devices/virtual/powercap:/host/powercap:ro
+    group_add:
+      - "$1" # $ENERGY_GROUP
+    environment:
+      CUTHULU_POWERCAP_DIR: /host/powercap
+EOF
+}
+
+energy_gid() { getent group "$ENERGY_GROUP" | cut -d: -f3; }
+
+# Create the group, install the rule and apply it to the zones there are now.
+energy_enable() {
+  if [[ -z $(energy_gid) ]]; then
+    "${SUDO[@]}" groupadd --system "$ENERGY_GROUP" || return
+  fi
+  energy_rule | "${SUDO[@]}" tee "$ENERGY_RULE" >/dev/null || return
+  "${SUDO[@]}" udevadm control --reload-rules || return
+  "${SUDO[@]}" udevadm trigger --settle --action=change --subsystem-match=powercap || return
+  log "The group $ENERGY_GROUP may read the CPU energy counters ($ENERGY_RULE)"
+}
+
+# Ask once (in a terminal) whether to enable the CPU power meter; once enabled, keep it and
+# rewrite the compose override. Never fails the install: Cuthulu works without it.
+energy_step() {
+  local answer gid
+  if [[ -f $ENERGY_RULE ]]; then
+    log "CPU power meter: enabled earlier, keeping it"
+  else
+    compgen -G "$POWERCAP/intel-rapl:*" >/dev/null || return 0
+    if ! is_terminal; then
+      log "CPU power meter skipped (no terminal); re-run scripts/install.sh in a terminal to enable it"
+      return 0
+    fi
+    echo
+    log "CPU power meter (optional)"
+    echo "    The host panel can show the CPU's power draw and the energy used since Cuthulu started,"
+    echo "    from the RAPL counters. Linux makes them root-only: on some CPUs, fine-grained power"
+    echo "    readings can leak data from other programs (PLATYPUS, CVE-2020-8694). Yes lets the group"
+    echo "    $ENERGY_GROUP, and so the Cuthulu container, read them; scripts/uninstall.sh undoes it."
+    if ! read -r -p "Let Cuthulu read the CPU energy counters? [y/N] " answer; then
+      echo
+      answer=
+    fi
+    if [[ ! $answer =~ ^[Yy]([Ee][Ss])?$ ]]; then
+      log "CPU power meter not enabled"
+      return 0
+    fi
+    energy_enable || {
+      warn "could not enable the CPU power meter; Cuthulu shows n/a instead"
+      return 0
+    }
+  fi
+  gid=$(energy_gid)
+  if [[ -z $gid ]]; then
+    warn "group $ENERGY_GROUP not found; the CPU power meter stays n/a"
+    return 0
+  fi
+  energy_override "$gid" | "${SUDO[@]}" tee "$ENERGY_OVERRIDE" >/dev/null \
+    || warn "cannot write $ENERGY_OVERRIDE; the CPU power meter stays n/a"
+}
+
 # --- Cuthulu ---------------------------------------------------------------------------------
 # Replace KEY's line in the env file, or add it.
 set_env() {
@@ -438,6 +533,8 @@ install_cuthulu() {
   "${DOCKER[@]}" pull --quiet "$helper_image" >/dev/null \
     || warn "cannot pull $helper_image; the env editor pulls it on first use"
 
+  energy_step
+
   # --- Compose file and systemd unit ---------------------------------------------------------
   log "Installing $INSTALL_DIR/compose.yaml"
   "${SUDO[@]}" install -m 0644 "$ROOT/compose.yaml" "$INSTALL_DIR/compose.yaml"
@@ -483,7 +580,7 @@ main() {
         ;;
       --companions-only) companions_only=true ;;
       --list-companions) list_companions=true ;;
-      -h | --help) sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+      -h | --help) sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
       *) die "unknown argument '$1' (try --help)" ;;
     esac
     shift

@@ -13,7 +13,7 @@ this file in the same change when a decision moves.
                           ├── registry  : in-memory view of all services
                           ├── providers
                           │     └── docker ──unix socket──▶ /var/run/docker.sock
-                          ├── system    : host CPU/memory/network/disk ──▶ procfs (read-only)
+                          ├── system    : host CPU/memory/network/disk, power, temps ──▶ procfs, sysfs (read-only)
                           └── notify    : alerts, heartbeat ──▶ SMTP, healthcheck URL (outbound only)
                           └── tailscale : admin console link ──unix socket──▶ tailscaled LocalAPI (GET status only)
                           └── rustdesk  : ID, password reset ──▶ procfs (is it running) + host helper (rustdesk CLI)
@@ -116,9 +116,11 @@ src/
     ansi.rs            ANSI SGR → style spans, other escapes stripped
     level.rs           level keyword detection (INFO, level=warn, …) for uncolored lines
   system/
-    mod.rs             SystemMonitor: on-demand shared sampler, Snapshot, rates, addresses, top processes
+    mod.rs             SystemMonitor: on-demand shared sampler, Snapshot, rates, addresses, top processes, energy tick
     proc.rs            pure parsers for /proc/stat, meminfo, loadavg, uptime, diskstats, net/{dev,route,fib_trie,if_inet6},
                        [pid]/stat|status|cmdline, /etc/passwd
+    sysfs.rs           hwmon temperatures + GPU load/clock, power_supply (AC / battery), RAPL zone discovery and status
+    energy.rs          RAPL counters: wraparound, watts between reads, energy since start, Pwr meter scale, tick interval
 templates/             base, index, service, not_found
 static/                app.css, app.js, theme.js, eye.svg, manifest.webmanifest, icons/, fonts/
 ```
@@ -216,7 +218,7 @@ services.
 | POST   | `/api/services/{id}/start\|stop\|restart` | Catalog services: `systemctl start\|stop\|restart <unit>` on the host (unit not installed: as below); others: the provider's action. Returns the service as known afterwards: the same id, else the re-created container or placeholder with its name, else the service as it was. Stop of `is_self` is `403`; user unit without `CUTHULU_HOST_USER` `409`; helper problems `503`; `systemctl` failures `500` with its message |
 | GET    | `/api/services/{id}/logs`          | SSE log stream; `?tail=` (≤ 10 000), `?follow=` |
 | GET    | `/api/events`                      | SSE registry stream |
-| GET    | `/api/system`                      | JSON host snapshot (CPU, memory, load, network, disk I/O, opt-in top processes); 503 if procfs is unreadable |
+| GET    | `/api/system`                      | JSON host snapshot (CPU, memory, load, network, disk I/O, CPU power and energy, temperatures, power source, GPU, opt-in top processes); 503 if procfs is unreadable |
 | GET    | `/api/system/stream`               | SSE host snapshots, one per `CUTHULU_SYSTEM_SECS` |
 | GET    | `/api/services/{id}/todos`         | The service's TODO items, oldest first |
 | POST   | `/api/services/{id}/todos`         | Add an item, body `{"text": "..."}`; returns the list |
@@ -346,8 +348,69 @@ image.
   checked under the same lock that starts it, so no subscriber is ever left
   without a sampler). Nobody watching = no sampling. Without processes a
   tick reads about ten small files; the work runs on the blocking pool.
+- **Power and sensors (sysfs, `src/system/sysfs.rs`, `energy.rs`):** read at
+  the end of every sample. sysfs is the host's in a container too (read-only,
+  not namespaced), so these need no mount — except RAPL, below.
+  - **Temperatures:** every `class/hwmon/hwmon*/temp*_input` (m°C), with
+    `temp*_label` and `temp*_crit` (kept only within 40–150 °C; others are
+    placeholders); readings outside −40–200 °C are dropped. The name is
+    friendly by driver: `k10temp`/`coretemp`/`zenpower`/`cpu_thermal` →
+    `cpu`, `amdgpu`/`nouveau`/`radeon`/`i915`/`xe` → `gpu`, `nvme`,
+    `drivetemp` → `disk`, `acpitz` → `acpi`, else the driver; chips sharing a
+    name are numbered (`nvme0`, `nvme1`). CPU chips keep one reading, the
+    package's (`Tctl`, `Package id N`, `Tdie`, else the first), not one per
+    core. ≤ 32 per snapshot.
+  - **Power source:** `class/power_supply/*`: on AC when a `Mains` or `USB`
+    supply is `online`; with no adapter, the battery's status decides. The
+    battery (type `Battery`, not `scope=Device` like a mouse) gives
+    capacity, status and watts (`power_now`, else `current_now ×
+    voltage_now`; absolute, as some firmware signs it); several add up
+    (charge by `energy_now / energy_full`, else mean capacity). Neither
+    adapter nor battery (most desktops) → no `supply`.
+  - **GPU:** the first hwmon chip with `device/gpu_busy_percent` or a
+    `freq*_label` of `sclk` (amdgpu): busy %, shader clock, and
+    `power1_average`/`power1_input` when present.
+  - **RAPL:** package zones `intel-rapl:N` named `package-*` under
+    `CUTHULU_POWERCAP_DIR` (flat `/sys/class/powercap` links, or a mounted
+    `/sys/devices/virtual/powercap` tree with its `intel-rapl/` level);
+    `intel-rapl-mmio:*` repeats the same packages and `psys` is not a
+    package, so both are skipped. Per package: `energy_uj`,
+    `max_energy_range_uj`, the `core` subzone, and the `long_term`
+    constraint's `power_limit_uw` (PL1). Probed once at startup into a
+    status: `ok`; `denied` (`energy_uj` is root-only, the kernel default
+    since CVE-2020-8694); `masked` (no zones under the configured dir, but
+    `<sys>/class/powercap` lists them — Docker hides
+    `/sys/devices/virtual/powercap` and its links dangle); `absent`.
+  - **Watts and energy:** each read folds the counters into one total:
+    the delta per package, `max − prev + now` across a wrap, nothing for a
+    counter that went back without a known range or for a jump above 5 kW
+    (a reset). Reads happen under one lock, so the tick and the sampler
+    never see each other's values out of order. Watts are the total's
+    growth over the last window of at least 500 ms, so a read right after
+    another keeps the previous value. Energy (Wh) is in memory only, since
+    the first read after startup.
+  - **Pwr scale:** the sum of the packages' PL1 limits when every package
+    has one (`scale: rapl`), else `CUTHULU_POWER_MAX_W` (`config`), else the
+    highest watts seen since start rounded up to the next multiple of 5 W,
+    at least 5 W (`peak`, `energy::peak_scale`; only while RAPL is `ok`).
+    The UI colors `rapl`/`config` by zone and never `peak`, which is no
+    limit.
+- **Energy tick:** while RAPL is `ok`, a task started from `main`
+  (`SystemMonitor::spawn_energy`) reads the counters every 60 s, or every
+  half wrap period at the highest power known (current, peak or PL1) when
+  that is shorter, at least 1 s apart; it stops with the shutdown token and
+  `main` awaits it. Not readable at startup → no task. Read failures are
+  logged once (warn) until they recover.
 - **Bounded:** broadcast capacity 4; ≤ 12 addresses; ≤ 20
-  processes per snapshot; command lines cut at 512 bytes.
+  processes per snapshot; command lines cut at 512 bytes; ≤ 32
+  temperatures; ≤ 64 entries looked at per sysfs directory.
+
+Snapshot fields added by the sensors (all others unchanged): `power`
+(always: `{status: ok|absent|denied|masked, watts?, core_watts?,
+scale_watts?, scale?: rapl|config|peak, energy_wh?, energy_secs?}`),
+`temps?` (`[{name, driver, label?, celsius, crit?}]`), `supply?`
+(`{source: ac|battery, battery?: {capacity?, status, watts?}}`) and `gpu?`
+(`{driver, busy?, mhz?, watts?}`); `?` fields are absent when unknown.
 
 > **Decision (2026-10):** host updates use a dedicated
 > `/api/system/stream` instead of a new event on `/api/events`. Every page
@@ -356,6 +419,21 @@ image.
 > lifetime to the panel: the client opens it only while the panel is
 > expanded and the tab visible. Snapshots also need different lag handling
 > (skip, not resync).
+
+> **Decision (2026-10):** the energy total needs every RAPL counter wrap
+> seen, which a sampler that runs only while someone watches cannot
+> promise. So while RAPL is readable an always-on tick reads the package
+> counters (two to four small files) once a minute, or often enough for two
+> reads per wrap period — the one exception to "nobody watching = no
+> sampling". No RAPL access, no tick. The total lives in memory only (no
+> file, no cost, reset on restart): persisting it would need the counter's
+> state across restarts and reboots, which the kernel does not keep.
+
+> **Decision (2026-10):** RAPL access is an opt-in host rule (group
+> `cuthulu-energy` + udev rule + a read-only mount), offered interactively
+> by `scripts/install.sh`, because the counters are root-only for a
+> security reason (PLATYPUS) and Docker masks them. No privileged container,
+> no capability. Without it the Pwr meter shows `n/a` and says why.
 
 > **Decision (2026-10):** the process list is off by default
 > (`CUTHULU_SYSTEM_PROCESSES=true` enables it). The panel is for an
@@ -773,6 +851,8 @@ context, so containers get their settings from Compose as before.
 | `CUTHULU_PROC_DIR`       | `/proc` (compose: `/host/proc`) | procfs the host panel reads; mount the host's read-only in a container |
 | `CUTHULU_SYSTEM_SECS`    | `2`                            | Host panel sampling interval (1–60), only while someone watches |
 | `CUTHULU_SYSTEM_PROCESSES` | `false`                      | Also list the top processes (by CPU / memory) in the host panel |
+| `CUTHULU_POWERCAP_DIR`   | `/sys/class/powercap` (`install.sh` override: `/host/powercap`) | Where the RAPL energy counters are; in a container, the host's `/sys/devices/virtual/powercap` mounted read-only ([DEPLOYMENT.md](DEPLOYMENT.md#cpu-power-meter)) |
+| `CUTHULU_POWER_MAX_W`    | unset                          | Full scale of the host panel's `Pwr` meter in whole watts (1–10 000), used when the kernel exposes no RAPL power limit; unset = the highest power seen, rounded up to 5 W, without warn/err colors |
 | `CUTHULU_DATA_DIR`       | `./data` (image: `/data`)      | Directory for `todos.json`, `notify.json` and `stopped.json`; created on first write |
 | `CUTHULU_NOTIFY_ENABLED` | `true`                         | Master switch for email and healthcheck pings (`false` keeps the settings but sends nothing) |
 | `CUTHULU_SMTP_HOST`      | —                              | SMTP server; unset = no email |
@@ -852,6 +932,12 @@ to the host**. Therefore:
 - The image runs as a non-root user (65532) from `scratch`.
 - The host's `/proc` (and optionally `/etc/passwd`) are mounted read-only;
   the panel shows process command lines but never environments.
+- RAPL energy counters stay root-only unless the user opts in
+  (`install.sh` asks): a udev rule then lets the group `cuthulu-energy` read
+  `energy_uj`, and the container gets that group plus a read-only mount of
+  `/sys/devices/virtual/powercap`. That shares a known power side channel
+  (CVE-2020-8694) with the container; nothing is written to sysfs by
+  Cuthulu itself.
 - RustDesk: the ID and a yes/no password state are read through the
   helper without a password; setting a new permanent password needs the
   host user's sudo password (same checks and limiter as the env editor).

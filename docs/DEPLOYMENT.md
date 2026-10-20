@@ -137,13 +137,15 @@ gets `IMAGE` and `DOCKER_GID` filled in, plus `CUTHULU_HOST_USER` (you, for
 the [env editor](#editing-env-files)) unless it is already set. A re-run
 keeps the installed `.env` (only `IMAGE` and `DOCKER_GID` are updated) unless
 you pass `--reconfigure`, re-copies `compose.yaml`, pulls or builds the image
-and the env editor's helper image, and restarts the service.
+and the env editor's helper image, and restarts the service. On a machine with
+RAPL it also asks, once, whether to enable the
+[CPU power meter](#cpu-power-meter).
 
 ```sh
 sudo $EDITOR /etc/cuthulu/.env && sudo systemctl reload cuthulu   # change settings
 systemctl status cuthulu
 docker logs -f cuthulu
-scripts/uninstall.sh            # remove the service; keeps /etc/cuthulu, volumes, images
+scripts/uninstall.sh            # remove the service (and CPU power access); keeps /etc/cuthulu, volumes, images
 scripts/uninstall.sh --purge    # also delete them (TODOs, notification settings, tailscale identity)
 ```
 
@@ -368,6 +370,84 @@ Network data is read through `/host/proc/1/net`, the host's namespace.
   browser has the panel open and visible.
 - "Network speed" is the current throughput of the default-route
   interface. Cuthulu never runs a bandwidth test or contacts the internet.
+- Temperatures (hwmon), the power source (`power_supply`) and the GPU's load
+  and clock (amdgpu) come from `/sys`, which containers see read-only and
+  host-wide: no mount or permission needed. Machines without them simply
+  show fewer rows.
+- The CPU power meter needs host setup, see below; without it the meter
+  reads a muted `n/a` and its tooltip says why.
+
+### CPU power meter
+
+The `Pwr` meter and the `Energy` row come from the CPU's RAPL energy
+counters (`/sys/class/powercap/intel-rapl:*`, Intel and AMD Zen alike). Two
+things keep Cuthulu from reading them by default:
+
+1. **The kernel makes `energy_uj` root-only.** Fine-grained power readings
+   can leak data from other programs on some CPUs (PLATYPUS,
+   [CVE-2020-8694](https://nvd.nist.gov/vuln/detail/CVE-2020-8694)), so
+   since late 2020 only root may read them. Cuthulu runs as uid 65532.
+2. **Docker hides `/sys/devices/virtual/powercap`** in every container
+   (same reason), so even root inside one sees dangling links.
+
+The trade-off: letting a group read the counters gives its members (here
+only the Cuthulu container) the same power readings root has. On a
+single-user home server that is usually fine; on a machine shared with
+untrusted local users or untrusted containers, leave it off.
+
+**With `scripts/install.sh`:** when the machine has RAPL and you run it in a
+terminal, it asks. Yes:
+
+- creates the system group `cuthulu-energy`;
+- installs `/etc/udev/rules.d/70-cuthulu-energy.rules`, which gives that
+  group read access to every RAPL zone's `energy_uj` whenever the zones
+  appear (boot, module reload), and applies it right away. A udev rule
+  rather than systemd-tmpfiles: tmpfiles runs once at boot and misses a
+  module loaded later;
+- writes `/etc/cuthulu/compose.override.yaml`, which Compose merges into
+  `compose.yaml`: the read-only mount
+  `/sys/devices/virtual/powercap:/host/powercap`, the group's gid in
+  `group_add`, and `CUTHULU_POWERCAP_DIR=/host/powercap`.
+
+Machines without RAPL are never asked and get no mount. Without a terminal
+the question is skipped; re-run the installer in one to answer it. Once
+enabled it is kept on re-runs; `scripts/uninstall.sh` removes the rule, the
+group and the override and puts the counters back to root-only.
+
+**With plain `compose.yaml`:** do the same by hand, then uncomment the three
+CPU power lines in `compose.yaml` (the mount, the `group_add` entry with the
+group's gid, and `CUTHULU_POWERCAP_DIR`):
+
+```sh
+sudo groupadd --system cuthulu-energy
+sudo tee /etc/udev/rules.d/70-cuthulu-energy.rules <<'EOF'
+ACTION=="add|change", SUBSYSTEM=="powercap", KERNEL=="intel-rapl:*", \
+  RUN+="/bin/chgrp cuthulu-energy /sys%p/energy_uj", RUN+="/bin/chmod g+r /sys%p/energy_uj"
+EOF
+sudo udevadm control --reload-rules
+sudo udevadm trigger --settle --action=change --subsystem-match=powercap
+getent group cuthulu-energy | cut -d: -f3    # the gid for group_add
+```
+
+`cargo run` reads `/sys/class/powercap` directly: add your user to
+`cuthulu-energy` (and log in again) instead of mounting anything.
+
+What it shows:
+
+- **Power** is the package energy between two reads over the time between
+  them, summed over CPU packages; the tooltip adds the cores' share when the
+  CPU reports it. The meter's full scale is the CPU's long-term power limit
+  (PL1) when the kernel exposes it, else `CUTHULU_POWER_MAX_W` (both color
+  the bar yellow / red at 70 / 90 %), else the highest power seen since
+  Cuthulu started, rounded up to 5 W and never colored as a warning.
+- **Energy** is counted since Cuthulu started, in memory only: a restart
+  starts from zero. The counters wrap (about every 1–2 hours at full load
+  on a laptop), so a light tick reads them once a minute, or more often if
+  they could wrap sooner, even when nobody has the dashboard open. That is
+  the only host reading that runs unwatched, and only when RAPL is
+  readable.
+- This is the CPU package only (cores, integrated GPU, memory controller),
+  not what the machine draws from the wall.
 ## Notifications
 
 Optional, three independent parts — set up any of them:
@@ -712,6 +792,10 @@ tailnet can stop, start and restart its containers. If that is too wide:
   published ports bypass `ufw`'s default rules, so use the `DOCKER-USER`
   chain;
 - set `CUTHULU_READ_ONLY=true` if you only want to watch.
+
+The [CPU power meter](#cpu-power-meter) is opt-in because reading the RAPL
+energy counters is root-only by default (a power side channel); enabling it
+lets the `cuthulu-energy` group read them.
 
 The [env editor](#editing-env-files) asks for your sudo password on every
 load and save; the password crosses the network in clear text over plain

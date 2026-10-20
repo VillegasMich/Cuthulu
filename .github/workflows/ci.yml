@@ -92,6 +92,7 @@ jobs:
       # shellcheck is preinstalled on the runner.
       - run: shellcheck scripts/*.sh
       - run: scripts/test-companions.sh
+      - run: scripts/test-energy.sh
 
   typos:
     name: typos

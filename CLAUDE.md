@@ -31,11 +31,13 @@ docker build -t cuthulu .
 DOCKER_GID=$(stat -c %g /var/run/docker.sock) docker compose up -d --build
 scripts/install.sh [--build]       # install as cuthulu.service (systemd, /etc/cuthulu); uninstall.sh removes it
 scripts/test-companions.sh        # install.sh companions step (no root/Docker/network); + shellcheck scripts/*.sh
+scripts/test-energy.sh            # install.sh CPU power meter step + uninstall (no root/Docker/network)
 ```
 
 Run fmt, clippy and tests before considering a change done. CI
 (`.github/workflows/ci.yml`) also runs rustdoc, MSRV, cargo-deny, typos,
-shellcheck + `scripts/test-companions.sh`, and a docker build + smoke test.
+shellcheck + `scripts/test-companions.sh` + `scripts/test-energy.sh`, and a
+docker build + smoke test.
 
 ## Where things live
 
