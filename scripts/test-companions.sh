@@ -214,7 +214,7 @@ check_contains "install.sh --companions= without a value" "--companions needs a 
 help=$("$INSTALL" --help)
 check_contains "--help shows --companions" "--companions LIST" "$help"
 check_contains "--help shows --list-companions" "--list-companions" "$help"
-check_contains "--help ends with the header" "scripts/uninstall.sh leaves them alone." \
+check_contains "--help ends with the header" "See docs/DEPLOYMENT.md#cpu-power-meter." \
   "$(tail -n 1 <<<"$help")"
 check_contains "--list-companions against the real catalog (stubbed host)" \
   "  1 auto-git-commit-tool    running        Keeps your GitHub contribution graph" \
